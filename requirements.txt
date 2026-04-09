@@ -1,0 +1,15 @@
+# Core pipeline
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+
+# Phase 2 — external collection (install when needed)
+shodan>=1.28
+censys>=2.2
+
+# Graph analysis (Phase 3)
+networkx>=3.2
+python-louvain>=0.16
+
+# Testing
+pytest>=8.0
+pytest-cov>=5.0

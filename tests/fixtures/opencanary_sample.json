@@ -1,0 +1,52 @@
+{
+    "dst_host": "10.0.0.1",
+    "dst_port": 21,
+    "local_time": "2026-04-10 03:41:22.000000",
+    "logdata": {
+        "PASSWORD": "admin123",
+        "USERNAME": "root"
+    },
+    "logtype": 2000,
+    "node_id": "iot-honeypot-de-01",
+    "src_host": "185.220.101.45",
+    "src_port": 51234
+}
+{
+    "dst_host": "10.0.0.1",
+    "dst_port": 22,
+    "local_time": "2026-04-10 03:42:01.000000",
+    "logdata": {
+        "PASSWORD": "pass123",
+        "USERNAME": "admin"
+    },
+    "logtype": 4000,
+    "node_id": "iot-honeypot-de-01",
+    "src_host": "92.118.160.5",
+    "src_port": 44321
+}
+{
+    "dst_host": "10.0.0.1",
+    "dst_port": 80,
+    "local_time": "2026-04-10 03:43:00.000000",
+    "logdata": {
+        "PATH": "/admin/login.php",
+        "HEADERS": {
+            "User-Agent": "curl/7.68.0",
+            "Host": "10.0.0.1"
+        }
+    },
+    "logtype": 3000,
+    "node_id": "iot-honeypot-de-01",
+    "src_host": "104.21.54.33",
+    "src_port": 55123
+}
+{
+    "dst_host": "10.0.0.1",
+    "dst_port": 0,
+    "local_time": "2026-04-10 03:44:00.000000",
+    "logdata": {},
+    "logtype": 17000,
+    "node_id": "iot-honeypot-de-01",
+    "src_host": "198.51.100.7",
+    "src_port": 0
+}
