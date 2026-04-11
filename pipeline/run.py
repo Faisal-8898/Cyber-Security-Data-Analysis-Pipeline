@@ -3,6 +3,9 @@
 Usage:
     python -m pipeline.run --tasks ingest,extract
     python -m pipeline.run --tasks ingest_cowrie
+    python -m pipeline.run --tasks poll_shodan
+    python -m pipeline.run --tasks poll_censys
+    python -m pipeline.run --tasks poll            # shodan + censys
     python -m pipeline.run --tasks all
 """
 from __future__ import annotations
@@ -36,12 +39,28 @@ def _run_extract_iocs(events: list) -> tuple[int, int]:
     return extract_iocs(events)
 
 
+def _run_poll_shodan() -> int:
+    from .poll_shodan import poll_shodan
+    return poll_shodan()
+
+
+def _run_poll_censys() -> int:
+    from .poll_censys import poll_censys
+    return poll_censys()
+
+
 _INGEST_TASKS = {
     "ingest_cowrie":     _run_ingest_cowrie,
     "ingest_opencanary": _run_ingest_opencanary,
 }
 
+_POLL_TASKS = {
+    "poll_shodan":  _run_poll_shodan,
+    "poll_censys":  _run_poll_censys,
+}
+
 _ALL_INGEST = list(_INGEST_TASKS.keys())
+_ALL_POLL   = list(_POLL_TASKS.keys())
 
 # ---------------------------------------------------------------------------
 # Pipeline runner
@@ -55,17 +74,23 @@ def run_pipeline(tasks: list[str]) -> int:
     """
     run_ingest  = any(t in tasks for t in [*_ALL_INGEST, "ingest", "all"])
     run_extract = "extract" in tasks or "all" in tasks
+    run_poll    = any(t in tasks for t in [*_ALL_POLL, "poll", "all"])
 
     # Which ingest tasks to run
-    specific = [t for t in tasks if t in _INGEST_TASKS]
-    if run_ingest and not specific:
-        specific = _ALL_INGEST
+    specific_ingest = [t for t in tasks if t in _INGEST_TASKS]
+    if run_ingest and not specific_ingest:
+        specific_ingest = _ALL_INGEST
+
+    # Which poll tasks to run
+    specific_poll = [t for t in tasks if t in _POLL_TASKS]
+    if run_poll and not specific_poll:
+        specific_poll = _ALL_POLL
 
     collected_events: list = []
     exit_code = 0
 
     # --- Ingest phase -------------------------------------------------------
-    for task_name in specific:
+    for task_name in specific_ingest:
         try:
             events = _INGEST_TASKS[task_name]()
             collected_events.extend(events or [])
@@ -84,6 +109,15 @@ def run_pipeline(tasks: list[str]) -> int:
     elif run_extract and not collected_events:
         logger.warning("extract_iocs requested but no events from ingest phase")
 
+    # --- Poll phase (Shodan / Censys) ----------------------------------------
+    for task_name in specific_poll:
+        try:
+            stored = _POLL_TASKS[task_name]()
+            logger.info(f"Poll complete: {task_name} → {stored} device records stored")
+        except Exception as exc:
+            logger.error(f"Task {task_name} failed: {exc}")
+            exit_code = 1
+
     return exit_code
 
 
@@ -91,7 +125,14 @@ def run_pipeline(tasks: list[str]) -> int:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-_VALID_TASKS = [*_ALL_INGEST, "ingest", "extract", "all"]
+_VALID_TASKS = [
+    *_ALL_INGEST,
+    *_ALL_POLL,
+    "ingest",
+    "extract",
+    "poll",
+    "all",
+]
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

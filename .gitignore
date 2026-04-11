@@ -1,0 +1,114 @@
+# ─── Python Environment ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ─── Python Cache & Compiled ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.c
+*.so
+*.o
+
+# ─── Testing & Coverage ──────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+*.cover
+
+# ─── IDE & Editor ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# ─── Environment & Configuration ─────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.secrets
+secrets.json
+
+# ─── Database & Docker ───────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+docker_data/
+.dockerignore
+
+# ─── Temporary & Backup Files ────────────────────────────────────────────────
+*.tmp
+*.bak
+*.backup
+*.old
+*_backup
+.tmp/
+temp/
+tmp/
+
+# ─── Log Files ───────────────────────────────────────────────────────────────
+*.log
+logs/
+*.out
+
+# ─── OS-specific Files ───────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ─── Node/npm (if used) ──────────────────────────────────────────────────────
+node_modules/
+npm-debug.log
+package-lock.json
+yarn.lock
+
+# ─── Jupyter Notebooks ───────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─── Pipeline-specific ───────────────────────────────────────────────────────
+pipeline/__pycache__/
+tests/__pycache__/
+*.pyc
+poll_censys_old.py
+poll_censys.py.bak

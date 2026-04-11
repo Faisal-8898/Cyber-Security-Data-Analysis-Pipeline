@@ -134,15 +134,22 @@ CREATE INDEX IF NOT EXISTS idx_cred_username ON credentials (username);
 
 -- ---------------------------------------------------------------
 -- 6. DEVICE RECORDS  (Shodan / Censys weekly snapshots)
+--
+-- Deduplication key: (source, ip, port, snapshot_week)
+--   snapshot_week = Monday of the snapshot week (longitudinal anchor)
+--   snapshot_date = actual date the query ran
+--   When same (ip, port) appears in multiple queries in the same week
+--   the UPSERT merges query_ids[] and keeps latest values.
 -- ---------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS device_records (
     id              BIGSERIAL    PRIMARY KEY,
     source          VARCHAR(10)  NOT NULL,   -- shodan | censys
-    snapshot_date   DATE         NOT NULL,
+    snapshot_week   DATE         NOT NULL,   -- Monday of snapshot week (longitudinal key)
+    snapshot_date   DATE         NOT NULL,   -- Actual date query ran
     ip              INET         NOT NULL,
     port            INT,
-    transport       VARCHAR(5),
-    protocol        VARCHAR(30),
+    transport       VARCHAR(5),              -- tcp | udp
+    protocol        VARCHAR(30),             -- http | ssh | telnet | mqtt ...
     product         TEXT,
     version         TEXT,
     cpe             TEXT[],
@@ -151,13 +158,51 @@ CREATE TABLE IF NOT EXISTS device_records (
     asn             BIGINT,
     org             TEXT,
     isp             TEXT,
+    -- IoT identification and enrichment fields
+    device_type     VARCHAR(30)  DEFAULT 'unknown',  -- router|camera|iot|server|unknown
+    hostnames       TEXT[]       DEFAULT '{}',
+    domains         TEXT[]       DEFAULT '{}',
+    tags            TEXT[]       DEFAULT '{}',       -- Shodan tags: iot|malware|vpn|...
+    http_title      TEXT,                            -- HTTP page title (admin panel detection)
+    http_server     TEXT,                            -- Server header: GoAhead|Boa|uhttpd|...
+    http_headers    JSONB        DEFAULT '{}',       -- Full HTTP response headers
+    ssl_cert        JSONB        DEFAULT '{}',       -- ssl.cert.subject + issuer
+    vulns           JSONB        DEFAULT '{}',       -- CVE details (Shodan vulns field)
+    -- Query provenance (which queries matched this record this week)
+    query_ids       TEXT[]       DEFAULT '{}',       -- e.g. ["port_23","busybox","port23_busybox"]
+    query_category  VARCHAR(10),                     -- Primary category: A|B|C|D|E|F|G|H|I|J|K|L
     raw_banner      TEXT,
     raw_data        JSONB        NOT NULL DEFAULT '{}'
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_dr_unique   ON device_records (source, ip, port, snapshot_date);
-CREATE INDEX        IF NOT EXISTS idx_dr_date     ON device_records (snapshot_date DESC);
-CREATE INDEX        IF NOT EXISTS idx_dr_ip       ON device_records (ip);
+-- Unique per (source, ip, port) per snapshot week — enables multi-query UPSERT merge
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dr_unique      ON device_records (source, ip, port, snapshot_week);
+CREATE INDEX        IF NOT EXISTS idx_dr_week        ON device_records (snapshot_week DESC);
+CREATE INDEX        IF NOT EXISTS idx_dr_date        ON device_records (snapshot_date DESC);
+CREATE INDEX        IF NOT EXISTS idx_dr_ip          ON device_records (ip);
+CREATE INDEX        IF NOT EXISTS idx_dr_source_week ON device_records (source, snapshot_week DESC);
+CREATE INDEX        IF NOT EXISTS idx_dr_device_type ON device_records (device_type);
+CREATE INDEX        IF NOT EXISTS idx_dr_asn         ON device_records (asn)  WHERE asn IS NOT NULL;
+CREATE INDEX        IF NOT EXISTS idx_dr_country     ON device_records (country_code) WHERE country_code IS NOT NULL;
+CREATE INDEX        IF NOT EXISTS idx_dr_port        ON device_records (port) WHERE port IS NOT NULL;
+
+-- ---------------------------------------------------------------
+-- 6b. SHODAN QUERY RUNS  (tracks each query execution for audit/reproducibility)
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS shodan_query_runs (
+    id              BIGSERIAL    PRIMARY KEY,
+    run_id          UUID         NOT NULL,           -- FK to pipeline_runs.run_id
+    source          VARCHAR(10)  NOT NULL,           -- shodan | censys
+    snapshot_week   DATE         NOT NULL,
+    query_id        VARCHAR(100) NOT NULL,           -- e.g. port_23, busybox, port23_busybox
+    query_category  VARCHAR(10)  NOT NULL,           -- A | B | ... | L
+    query_string    TEXT         NOT NULL,           -- exact query sent to API
+    results_total   INT          DEFAULT 0,          -- total hits reported by API
+    results_fetched INT          DEFAULT 0,          -- records actually stored
+    executed_at     TIMESTAMPTZ  DEFAULT NOW(),
+    error           TEXT,                            -- non-NULL if query failed
+    UNIQUE (source, snapshot_week, query_id)
+);
 
 -- ---------------------------------------------------------------
 -- 7. GRAPH  (nodes + edges)
