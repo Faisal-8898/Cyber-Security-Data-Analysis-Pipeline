@@ -235,53 +235,6 @@ the row is **updated in-place** and `query_ids[]` is merged (array union).
 `shodan_query_runs` records every individual query execution (query string,
 total API hits, records stored, errors) — **full reproducibility guarantee**.
 
----
-
-## Useful Analysis Queries
-
-```sql
--- Weekly device count by source
-SELECT source, snapshot_week, COUNT(*) AS devices
-FROM device_records
-GROUP BY source, snapshot_week ORDER BY snapshot_week DESC;
-
--- Device type distribution this week
-SELECT device_type, COUNT(*) AS n
-FROM device_records
-WHERE snapshot_week = DATE_TRUNC('week', NOW())
-GROUP BY device_type ORDER BY n DESC;
-
--- Proxy / monetization candidates (category E)
-SELECT ip, port, org, country_code, product, http_server
-FROM device_records
-WHERE 'port_1080'    = ANY(query_ids)
-   OR 'port_3128'    = ANY(query_ids)
-   OR 'socks5'       = ANY(query_ids)
-   OR 'proxy_server' = ANY(query_ids)
-ORDER BY snapshot_week DESC LIMIT 100;
-
--- High-risk routers with TR-069 open (category B)
-SELECT ip, port, org, country_code, version, snapshot_week
-FROM device_records
-WHERE device_type = 'router' AND 'tr069' = ANY(query_ids)
-ORDER BY snapshot_week DESC;
-
--- IoT compromise linkage: IPs in both honeypot events AND device_records
-SELECT dr.ip, dr.device_type, dr.org, dr.country_code,
-       COUNT(DISTINCT he.session_id) AS attack_sessions
-FROM device_records dr
-JOIN honeypot_events he ON he.source_ip = dr.ip
-GROUP BY dr.ip, dr.device_type, dr.org, dr.country_code
-ORDER BY attack_sessions DESC LIMIT 50;
-
--- Query run audit (reproducibility check)
-SELECT query_id, query_category, results_total, results_fetched,
-       executed_at, error
-FROM shodan_query_runs
-WHERE source = 'shodan'
-  AND snapshot_week = DATE_TRUNC('week', NOW())
-ORDER BY query_category, query_id;
-```
 
 ---
 

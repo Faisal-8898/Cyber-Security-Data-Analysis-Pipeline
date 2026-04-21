@@ -3,7 +3,7 @@ You ONLY want security-relevant device exposure signals
 Think:
 👉 “What makes this device relevant to compromise + monetization?”
 
-🔴 Core Shodan fields you SHOULD extract
+Core Shodan fields you SHOULD extract
 1. Device identity layer (mandatory)
 
 These are essential for your IoT + botnet mapping:

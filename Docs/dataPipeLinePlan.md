@@ -62,19 +62,19 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  VPS — Sensor Node  (1 GB RAM · Ubuntu 24.04 · Germany)          │
-│                                                                   │
+│  VPS — Sensor Node  (1 GB RAM · Ubuntu 24.04 · Germany)         │
+│                                                                 │
 │  ┌──────────┐   ┌────────────┐   ┌──────────────┐               │
-│  │  Cowrie  │   │ OpenCanary │   │    Glutton   │  ◄─ attackers  │
+│  │  Cowrie  │   │ OpenCanary │   │    Glutton   │  ◄─ attackers │
 │  │ SSH/Tel  │   │ Multi-prot │   │  Catch-all   │               │
 │  └────┬─────┘   └──────┬─────┘   └──────┬───────┘               │
-│       └────────────────┴────────────────┘                        │
-│                         │ writes JSON log files to disk           │
-│         /home/cowrie/var/log/cowrie/cowrie.json                   │
-│         /var/tmp/opencanary.log                                   │
-│                                                                   │
-│  Nothing else runs here. No PostgreSQL. No pipeline process.      │
-└──────────────────────────┬────────────────────────────────────────┘
+│       └────────────────┴────────────────┘                       │
+│                         │ writes JSON log files to disk         │
+│         /home/cowrie/var/log/cowrie/cowrie.json                 │
+│         /var/tmp/opencanary.log                                 │
+│                                                                 │
+│  Nothing else runs here. No PostgreSQL. No pipeline process.    │
+└──────────────────────────┬──────────────────────────────────────┘
                            │
               rsync pull over SSH (port 2222)
               every 30 minutes, triggered from local
@@ -88,7 +88,7 @@
 │  ├── opencanary/         │  sync_logs  (rsync pull from VPS)   │  │
 │  └── glutton/            │  ingest_cowrie + ingest_opencanary  │  │
 │                          │  store_raw_events                   │  │
-│  API credentials (.env)  │  extract_credentials / urls / c2   │  │
+│  API credentials (.env)  │  extract_credentials / urls / c2    │  │
 │  SHODAN_API_KEY          │                                     │  │
 │  CENSYS_API_ID/SECRET    │ daily 01:00 UTC:                    │  │
 │                          │  aggregate_churn                    │  │
@@ -104,7 +104,7 @@
 │                          └───────────────────┬─────────────────┘  │
 │                                              │                    │
 │                          ┌───────────────────▼─────────────────┐  │
-│                          │      PostgreSQL 16 (master DB)       │  │
+│                          │      PostgreSQL 16 (master DB)      │  │
 │                          │  honeypot_events  (partitioned)     │  │
 │                          │  ioc_records                        │  │
 │                          │  device_records  (Shodan/Censys)    │  │
