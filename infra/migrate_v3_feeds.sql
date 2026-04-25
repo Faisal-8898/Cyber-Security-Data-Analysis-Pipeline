@@ -62,4 +62,65 @@ JOIN feed_iocs fi
 WHERE ir.ioc_type  = 'url'
   AND fi.source    = 'urlhaus';
 
+-- Cross-match view: honeypot SHA256 hashes confirmed in MalwareBazaar
+CREATE OR REPLACE VIEW v_honeypot_malwarebazaar_matches AS
+SELECT
+    ir.ioc_value                      AS honeypot_sha256,
+    ir.source_event_id,
+    fi.malware_family,
+    fi.confidence,
+    fi.tags                           AS feed_tags,
+    fi.first_seen                     AS mb_first_seen,
+    fi.last_seen                      AS mb_last_seen,
+    fi.raw_data->>'file_type'         AS file_type,
+    fi.raw_data->>'file_size'         AS file_size
+FROM ioc_records ir
+JOIN feed_iocs fi
+    ON ir.ioc_value = fi.ioc_value
+WHERE ir.ioc_type  = 'sha256'
+  AND fi.source    = 'malwarebazaar';
+
+-- Cross-match view: honeypot IOC IPs that appear in OTX pulse indicators
+CREATE OR REPLACE VIEW v_honeypot_otx_matches AS
+SELECT
+    ir.ioc_value                      AS honeypot_ip,
+    ir.source_event_id,
+    fi.malware_family,
+    fi.tags                           AS pulse_tags,
+    fi.confidence,
+    fi.first_seen                     AS otx_first_seen,
+    fi.raw_data->>'pulse_name'        AS pulse_name,
+    fi.raw_data->>'pulse_id'          AS pulse_id
+FROM ioc_records ir
+JOIN feed_iocs fi
+    ON ir.ioc_value = fi.ip::text
+WHERE ir.ioc_type  = 'ip'
+  AND fi.source    = 'otx';
+
+-- Aggregate cross-match summary (used directly in paper Section 8 RQ2)
+CREATE OR REPLACE VIEW v_rq2_linkage_summary AS
+SELECT
+    'threatfox'      AS feed,
+    COUNT(DISTINCT honeypot_ip)  AS matched_honeypot_iocs,
+    COUNT(DISTINCT malware_family) AS malware_families
+FROM v_honeypot_threatfox_matches
+UNION ALL
+SELECT
+    'urlhaus',
+    COUNT(DISTINCT honeypot_url),
+    NULL
+FROM v_honeypot_urlhaus_matches
+UNION ALL
+SELECT
+    'malwarebazaar',
+    COUNT(DISTINCT honeypot_sha256),
+    COUNT(DISTINCT malware_family)
+FROM v_honeypot_malwarebazaar_matches
+UNION ALL
+SELECT
+    'otx',
+    COUNT(DISTINCT honeypot_ip),
+    COUNT(DISTINCT malware_family)
+FROM v_honeypot_otx_matches;
+
 \echo 'feed_iocs table and cross-match views created.'

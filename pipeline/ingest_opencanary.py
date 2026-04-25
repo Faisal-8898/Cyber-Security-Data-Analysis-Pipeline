@@ -53,6 +53,11 @@ def parse_opencanary_line(
         return None
 
     logtype  = e.get("logtype", 0)
+
+    # logtype 1001 = internal OpenCanary startup/service messages — no attacker data
+    if logtype == 1001:
+        return None
+
     protocol = _LOGTYPE_PROTOCOL.get(logtype, f"unknown_{logtype}")
 
     # Synthesize a timestamp field so make_event picks it up
@@ -60,9 +65,14 @@ def parse_opencanary_line(
 
     ev = make_event("opencanary", run_id, git_hash, log_file, line_no, e)
 
-    ev["source_ip"]   = e.get("src_host")
-    ev["source_port"] = e.get("src_port")
-    ev["dest_port"]   = e.get("dst_port")
+    # Sanitize: empty string is not a valid INET value
+    src_host = e.get("src_host") or None
+    src_port = e.get("src_port")
+    dst_port = e.get("dst_port")
+
+    ev["source_ip"]   = src_host if src_host else None
+    ev["source_port"] = src_port if isinstance(src_port, int) and src_port > 0 else None
+    ev["dest_port"]   = dst_port if isinstance(dst_port, int) and dst_port > 0 else None
     ev["protocol"]    = protocol
 
     logdata = e.get("logdata", {}) or {}

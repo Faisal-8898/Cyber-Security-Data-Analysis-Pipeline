@@ -34,6 +34,11 @@ def _run_ingest_opencanary() -> list:
     return ingest_opencanary()
 
 
+def _run_ingest_glutton() -> list:
+    from .ingest_glutton import ingest_glutton
+    return ingest_glutton()
+
+
 def _run_extract_iocs(events: list) -> tuple[int, int]:
     from .extract_iocs import extract_iocs
     return extract_iocs(events)
@@ -75,6 +80,7 @@ def _run_cluster_campaigns(G=None) -> int:
 _INGEST_TASKS = {
     "ingest_cowrie":     _run_ingest_cowrie,
     "ingest_opencanary": _run_ingest_opencanary,
+    "ingest_glutton":    _run_ingest_glutton,
 }
 
 _POLL_TASKS = {
@@ -191,6 +197,7 @@ _VALID_TASKS = [
     *_ALL_POLL,
     *_ALL_GRAPH,
     "ingest",
+    "ingest_glutton",
     "extract",
     "poll",
     "aggregate_churn",

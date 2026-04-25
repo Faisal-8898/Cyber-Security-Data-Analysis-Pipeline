@@ -175,15 +175,31 @@ def upsert_iocs(iocs: list[dict]) -> int:
     if not iocs:
         return 0
 
+    # Deduplicate within the batch: same (ioc_type, ioc_value) in one
+    # execute_values call causes a CardinalityViolation. Merge duplicates
+    # by keeping the earliest first_seen and latest last_seen.
+    merged: dict[tuple, dict] = {}
+    for i in iocs:
+        key = (i["ioc_type"], i["ioc_value"])
+        if key in merged:
+            existing = merged[key]
+            existing["first_seen"] = min(existing["first_seen"], i["first_seen"])
+            existing["last_seen"]  = max(existing["last_seen"],  i["last_seen"])
+            existing["source_honeypots"] = list(
+                set(existing.get("source_honeypots", []) + i.get("source_honeypots", []))
+            )
+        else:
+            merged[key] = dict(i)
+
     rows = [
         (
-            i["ioc_type"],
-            i["ioc_value"],
-            i["first_seen"],
-            i["last_seen"],
-            i.get("source_honeypots", []),
+            v["ioc_type"],
+            v["ioc_value"],
+            v["first_seen"],
+            v["last_seen"],
+            v.get("source_honeypots", []),
         )
-        for i in iocs
+        for v in merged.values()
     ]
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -216,9 +232,20 @@ def upsert_credentials(creds: list[dict]) -> int:
     if not creds:
         return 0
 
+    # Deduplicate within the batch to avoid CardinalityViolation
+    merged_creds: dict[tuple, dict] = {}
+    for c in creds:
+        key = (c["username"], c["password"])
+        if key in merged_creds:
+            existing = merged_creds[key]
+            existing["first_seen"] = min(existing["first_seen"], c["first_seen"])
+            existing["last_seen"]  = max(existing["last_seen"],  c["last_seen"])
+        else:
+            merged_creds[key] = dict(c)
+
     rows = [
         (c["username"], c["password"], c["first_seen"], c["last_seen"])
-        for c in creds
+        for c in merged_creds.values()
     ]
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -406,50 +433,95 @@ def get_completed_query_ids(source: str, snapshot_week: str) -> set[str]:
 
 def aggregate_churn(day: Optional[str] = None) -> int:
     """
-    Aggregate honeypot_events for *day* (ISO8601 date string, default: yesterday)
-    into ip_activity_daily.  Safe to re-run — uses ON CONFLICT DO UPDATE.
+    Aggregate honeypot_events for *day* (ISO8601 date string) into ip_activity_daily.
+    If day is None, backfill all missing days from last successful run through yesterday.
+    Safe to re-run — uses ON CONFLICT DO UPDATE.
 
-    Returns the number of rows inserted or updated.
+    Tracks last aggregated day in PIPELINE_STATE_DIR/churn_last_day.txt for catch-up.
+    Returns the total number of rows inserted or updated across all days.
     """
     import datetime as _dt
-    if day is None:
-        day = (
-            _dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=1)
-        ).isoformat()
+    import json as _json
+    from pathlib import Path as _Path
 
+    state_dir = _Path(os.environ.get("PIPELINE_STATE_DIR", "/tmp"))
+    last_day_file = state_dir / "churn_last_day.txt"
+
+    # Determine day(s) to aggregate
+    if day is not None:
+        # Manual override: specific day only
+        days_to_agg = [day]
+    elif os.environ.get("CHURN_DAY"):
+        # Env var override: specific day only
+        days_to_agg = [os.environ.get("CHURN_DAY")]
+    else:
+        # Auto mode: backfill missing days
+        today = _dt.datetime.now(_dt.timezone.utc).date()
+        yesterday = today - _dt.timedelta(days=1)
+
+        if last_day_file.exists():
+            with open(last_day_file) as f:
+                last_agg_day = _dt.date.fromisoformat(f.read().strip())
+        else:
+            # First run: start from 7 days ago for safety
+            last_agg_day = today - _dt.timedelta(days=7)
+
+        # Generate all days from (last_agg_day + 1) to yesterday
+        current_day = last_agg_day + _dt.timedelta(days=1)
+        days_to_agg = []
+        while current_day <= yesterday:
+            days_to_agg.append(current_day.isoformat())
+            current_day += _dt.timedelta(days=1)
+
+        if not days_to_agg:
+            logger.info(f"aggregate_churn: already aggregated through {last_agg_day}")
+            return 0
+
+    total_rows = 0
     with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO ip_activity_daily
-                    (day, source_ip, honeypot,
-                     event_count, login_attempts, unique_sessions,
-                     first_event, last_event)
-                SELECT
-                    event_time::DATE            AS day,
-                    source_ip,
-                    honeypot,
-                    COUNT(*)                    AS event_count,
-                    COUNT(*) FILTER (
-                        WHERE event_type LIKE 'login%%'
-                    )                           AS login_attempts,
-                    COUNT(DISTINCT session_id)  AS unique_sessions,
-                    MIN(event_time)             AS first_event,
-                    MAX(event_time)             AS last_event
-                FROM honeypot_events
-                WHERE event_time::DATE = %s::DATE
-                  AND source_ip IS NOT NULL
-                GROUP BY event_time::DATE, source_ip, honeypot
-                ON CONFLICT (day, source_ip, honeypot) DO UPDATE SET
-                    event_count     = EXCLUDED.event_count,
-                    login_attempts  = EXCLUDED.login_attempts,
-                    unique_sessions = EXCLUDED.unique_sessions,
-                    first_event     = EXCLUDED.first_event,
-                    last_event      = EXCLUDED.last_event
-                """,
-                (day,),
-            )
-            return cur.rowcount
+        for d in days_to_agg:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ip_activity_daily
+                        (day, source_ip, honeypot,
+                         event_count, login_attempts, unique_sessions,
+                         first_event, last_event)
+                    SELECT
+                        event_time::DATE            AS day,
+                        source_ip,
+                        honeypot,
+                        COUNT(*)                    AS event_count,
+                        COUNT(*) FILTER (
+                            WHERE event_type LIKE 'login%%'
+                        )                           AS login_attempts,
+                        COUNT(DISTINCT session_id)  AS unique_sessions,
+                        MIN(event_time)             AS first_event,
+                        MAX(event_time)             AS last_event
+                    FROM honeypot_events
+                    WHERE event_time::DATE = %s::DATE
+                      AND source_ip IS NOT NULL
+                    GROUP BY event_time::DATE, source_ip, honeypot
+                    ON CONFLICT (day, source_ip, honeypot) DO UPDATE SET
+                        event_count     = EXCLUDED.event_count,
+                        login_attempts  = EXCLUDED.login_attempts,
+                        unique_sessions = EXCLUDED.unique_sessions,
+                        first_event     = EXCLUDED.first_event,
+                        last_event      = EXCLUDED.last_event
+                    """,
+                    (d,),
+                )
+                rows = cur.rowcount
+                total_rows += rows
+                logger.info(f"aggregate_churn: day={d}, rows={rows}")
+
+    # Update last aggregated day
+    if days_to_agg:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with open(last_day_file, "w") as f:
+            f.write(days_to_agg[-1])
+
+    return total_rows
 
 
 # ---------------------------------------------------------------
