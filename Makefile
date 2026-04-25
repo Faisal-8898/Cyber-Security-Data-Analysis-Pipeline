@@ -1,8 +1,12 @@
-.PHONY: db-up db-down db-reset db-migrate venv install test test-all cov run check-db \
+.PHONY: db-up db-down db-reset db-migrate db-migrate-feeds venv install test test-all cov run check-db \
         poll-shodan poll-censys poll run-ingest run-extract \
         poll-shodan-resume poll-shodan-from \
         poll-censys-resume poll-censys-from \
+        poll-shodan-max poll-censys-max poll-max \
+        poll-censys-paper poll-paper \
+        poll-feeds \
         check-balance censys-balance censys-test query-summary \
+        reclassify \
         aggregate-churn aggregate-churn-date \
         build-graph build-graph-dry graph-only cluster
 
@@ -112,6 +116,65 @@ poll-shodan-from:
 poll:
 	.venv/bin/python3 -m pipeline.run --tasks poll
 
+# ─── Max-credit runs — use ALL available credits in one go ───────────────────
+
+# Shodan: fetch 200 results/query (2 pages = 2 credits) × 40 queries = 80 credits
+# Raises per-query cost; best used after you know which queries hit the 100-result cap.
+poll-shodan-max:
+	SHODAN_MAX_PER_QUERY=200 .venv/bin/python3 -m pipeline.run --tasks poll_shodan
+
+# Censys: enrich up to 100 IPs (= 100 credits, the full monthly Free allowance) in one run
+poll-censys-max:
+	CENSYS_MAX_ENRICH=100 .venv/bin/python3 -m pipeline.run --tasks poll_censys
+
+# Paper-focused enrichment: RQ3 (monetization linkage) + RQ4 (campaign clustering) signals
+#
+# Research alignment (from WHOLE_RESEARCH.md Section 5.8 + 5.7):
+#   RQ3: Proxy/DDoS/SMTP monetization signals
+#     - Ports: 1080 (SOCKS), 3128 (Squid), 8080 (HTTP proxy), 25 (SMTP)
+#   RQ4: Campaign infrastructure clustering seeds
+#     - Combo queries: port23+busybox, port7547+TR069, port554+RTSP, port80+GoAhead
+#   Cross-cutting: Botnet infection + device type (router/camera/iot)
+#
+# Credits: 60 enrichments/week × 4 weeks = 240/month (sustainable over 100cr/wk avg)
+# Data quality: Prioritise E,L,F,H categories for research novelty
+#
+poll-censys-paper:
+	CENSYS_MAX_ENRICH=60 \
+	CENSYS_PRIORITY_CATEGORIES=E,L,F,H \
+	CENSYS_PRIORITY_PORTS=1080,3128,8080,25,7547,23,2323,554 \
+	CENSYS_PRIORITY_DEVICE_TYPES=router,camera,iot \
+	.venv/bin/python3 -m pipeline.run --tasks poll_censys
+
+# ────── RECOMMENDED: One-command weekly research collection ──────────────────
+# Collects:
+#   - All Shodan queries (40) with 200 results/query for device baseline (RQ1)
+#   - All 40+ high-value Shodan IPs via Censys enrichment (60 credits)
+#   - Total: ~400 device_records with cross-source validation
+#   - Total credits: 80 Shodan (40q × 2cr) + 60 Censys = 140/week
+poll-paper:
+	@echo "───────────────────────────────────────────────────────────────────"
+	@echo "  Collecting for IEEE IoT-Journal paper (RQ1-RQ4)"
+	@echo "  - Shodan: 40 queries × 200 results = 80 credits (device baseline)"
+	@echo "  - Censys: 60 high-value IPs (monetization + campaigns)"
+	@echo "  - Total: ~400 device_records with cross-source validation"
+	@echo "  - Credit cost: 140/week (sustainable over 4 weeks)"
+	@echo "───────────────────────────────────────────────────────────────────"
+	SHODAN_MAX_PER_QUERY=200 .venv/bin/python3 -m pipeline.run --tasks poll_shodan
+	@echo "  ✅ Shodan snapshot complete"
+	$(MAKE) poll-censys-paper
+	@echo "  ✅ Censys enrichment complete"
+	@echo "───────────────────────────────────────────────────────────────────"
+
+# Both max-credit runs back-to-back (extreme: use all budget in one week)
+poll-max:
+	SHODAN_MAX_PER_QUERY=200 .venv/bin/python3 -m pipeline.run --tasks poll_shodan
+	CENSYS_MAX_ENRICH=100 \
+	CENSYS_PRIORITY_CATEGORIES=E,L,F,H \
+	CENSYS_PRIORITY_PORTS=1080,3128,8080,25,7547,23,2323,554 \
+	CENSYS_PRIORITY_DEVICE_TYPES=router,camera,iot \
+	.venv/bin/python3 -m pipeline.run --tasks poll_censys
+
 # Check remaining Shodan API credits for the configured SHODAN_API_KEY
 check-balance:
 	@.venv/bin/python3 scripts/check_balance.py
@@ -120,7 +183,7 @@ check-balance:
 censys-balance:
 	@.venv/bin/python3 scripts/censys_balance.py
 
-# Quick test: validate Censys PAT with a v3 host lookup of 1.1.1.1 (costs 1 credit)
+# Quick test: validate Censys PAT using the free credit-balance endpoint (costs 0 credits)
 censys-test:
 	@.venv/bin/python3 scripts/censys_balance.py
 
@@ -128,31 +191,40 @@ censys-test:
 query-summary:
 	@.venv/bin/python3 scripts/query_summary.py
 
-# ─── Daily churn aggregation (T07) ────────────────────────────────────────────
+# Reclassify existing device_records using the latest infer_device_type() signals.
+# Safe to run repeatedly — only touches rows currently labelled 'unknown'.
+# Adds 'proxy' as a first-class type (RQ3 monetization evidence, Section 5.8).
+reclassify:
+	@echo "Reclassifying unknown device records in DB..."
+	@psql "postgresql://pipeline:pipepipe@localhost:5453/iot_research" \
+	     -f scripts/reclassify_device_types.sql
 
-# Aggregate yesterday's honeypot_events into ip_activity_daily
+# Apply feed_iocs migration (adds ThreatFox/URLhaus table + cross-match views)
+db-migrate-feeds:
+	@psql "postgresql://pipeline:pipepipe@localhost:5453/iot_research" \
+	     -f infra/migrate_v3_feeds.sql
+
+# Pull ThreatFox C2 IOCs + URLhaus malicious URLs, store in feed_iocs, print RQ2 cross-match
+poll-feeds:
+	.venv/bin/python3 -m pipeline.run --tasks poll_feeds
+
+# ─── Daily churn aggregation ─────────────────────────────────────────────────
 aggregate-churn:
 	.venv/bin/python3 -m pipeline.run --tasks aggregate_churn
 
-# Aggregate a specific date, e.g.: make aggregate-churn-date DAY=2026-04-10
 aggregate-churn-date:
 	@test -n "$(DAY)" || (echo "Usage: make aggregate-churn-date DAY=YYYY-MM-DD"; exit 1)
 	CHURN_DAY=$(DAY) .venv/bin/python3 -m pipeline.run --tasks aggregate_churn
 
-# ─── Graph build + campaign clustering (T10, T11) ────────────────────────────
-
-# Dry-run: build graph in memory, print stats, do NOT write to DB or disk
+# ─── Graph build + campaign clustering ───────────────────────────────────────
 build-graph-dry:
 	GRAPH_DRY_RUN=1 .venv/bin/python3 -m pipeline.run --tasks build_graph,cluster
 
-# Real run (Sunday 04:00 UTC — after Shodan/Censys poll at 02:00)
 build-graph:
 	.venv/bin/python3 -m pipeline.run --tasks build_graph,cluster
 
-# Graph only, no clustering (useful for debugging)
 graph-only:
 	.venv/bin/python3 -m pipeline.run --tasks build_graph
 
-# Campaign clustering only (uses existing graph_nodes cluster_id column)
 cluster:
 	.venv/bin/python3 -m pipeline.run --tasks cluster

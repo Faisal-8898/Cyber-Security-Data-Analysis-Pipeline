@@ -64,21 +64,42 @@ def _monday_of_week(d: date | None = None) -> date:
 _CAMERA_SIGNALS = {
     "camera", "dvr", "nvr", "ipcam", "ip cam", "netcam", "webcam",
     "surveillance", "cctv", "hikvision", "dahua", "axis", "foscam",
-    "vivotek", "tvt", "rtsp",
+    "vivotek", "tvt", "rtsp", "amcrest", "reolink", "uniview", "hanwha",
+    "geovision", "pelco", "dlink camera", "d-link dcs",
 }
 _ROUTER_SIGNALS = {
     "router", "gateway", "goahead-webs", "goahead", "boa", "uhttpd",
     "mini_httpd", "rompager", "tr-069", "cwmp", "dsl-2", "mikrotik",
     "dd-wrt", "openwrt", "tp-link", "linksys", "netgear", "zyxel",
-    "draytek", "huawei home", "asus router",
+    "draytek", "huawei home", "asus router", "routerlogin", "dsl router",
+    "adsl", "vdsl", "broadband router", "home gateway", "totolink",
+    "tenda", "d-link router", "belkin", "motorola router",
 }
+# RQ3 (monetization): proxy as first-class device type.
+# Signals map to Section 5.8 proxy indicators (ports 1080/3128/8080,
+# banners, proxy protocol hints) and Contribution 3 measurements.
+_PROXY_SIGNALS = {
+    "squid", "tinyproxy", "privoxy", "3proxy", "ccproxy", "polipo",
+    "iplanet-web-proxy", "sun-java-system-web-proxy", "ebay-proxy-server",
+    "cdn cache server", "zscaler", "bluecoat", "forcepoint",
+    "http connect", "http-connect", "socks5", "socks4",
+    "http proxy", "proxy server", "open proxy",
+}
+_PROXY_PROTOCOLS = {"socks5-proxy", "socks4-proxy", "http-connect"}
+_PROXY_PORTS     = {1080, 3128}   # 8080 shared with routers — checked last
 _IOT_SIGNALS = {
     "busybox", "dropbear", "mirai", "iot", "embedded", "mips", "arm",
-    "/bin/busybox", "uclibc",
+    "/bin/busybox", "uclibc", "mqtt", "mosquitto", "zigbee", "zwave",
+    "openwrt", "lede", "padavan", "telnet",
 }
+_IOT_PROTOCOLS  = {"mqtt", "coap"}
 _SERVER_SIGNALS = {
     "nginx", "apache", "iis", "litespeed", "caddy", "jetty",
-    "tomcat", "flask", "gunicorn",
+    "tomcat", "flask", "gunicorn", "smtp", "postfix", "exim", "sendmail",
+    "dovecot", "courier", "cyrus", "microsoft-iis", "openssl",
+    "openssh", "samba", "smb", "mssql", "mysql", "postgresql", "redis",
+    "mongodb", "elasticsearch", "memcached", "influxdb", "prometheus",
+    "kubernetes", "docker",
 }
 
 
@@ -90,16 +111,34 @@ def infer_device_type(
     port: int | None,
     tags: list[str] | None,
 ) -> str:
-    """Return router | camera | iot | server | unknown based on available signals."""
+    """Return camera | router | proxy | iot | server | unknown.
+
+    Priority order is intentional:
+      1. camera  — clearest IoT sub-type (RQ1 device distribution)
+      2. router  — clearest IoT sub-type (RQ1)
+      3. proxy   — RQ3 monetization signal; checked before generic server
+      4. iot     — general embedded/infected device (RQ1)
+      5. server  — conventional infrastructure
+      6. unknown — no signal matched; still tracked for ablation (RQ1 Section 5.4)
+    """
     combined = " ".join(
         filter(None, [product, http_server, http_title, banner, " ".join(tags or [])])
     ).lower()
+    proto_lc = (product or "").lower()
 
     if any(k in combined for k in _CAMERA_SIGNALS) or port == 554:
         return "camera"
     if any(k in combined for k in _ROUTER_SIGNALS) or port == 7547:
         return "router"
-    if any(k in combined for k in _IOT_SIGNALS):
+    # proxy: banner/server match OR protocol is a proxy protocol
+    # OR port is a canonical proxy port AND there is any http/socks banner
+    if (
+        any(k in combined for k in _PROXY_SIGNALS)
+        or proto_lc in _PROXY_PROTOCOLS
+        or (port in _PROXY_PORTS and combined)
+    ):
+        return "proxy"
+    if any(k in combined for k in _IOT_SIGNALS) or proto_lc in _IOT_PROTOCOLS:
         return "iot"
     if any(k in combined for k in _SERVER_SIGNALS):
         return "server"

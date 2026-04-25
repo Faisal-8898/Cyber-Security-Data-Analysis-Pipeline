@@ -35,6 +35,9 @@ Environment variables
   CENSYS_API_SECRET               required — Personal Access Token (censys_...)
   CENSYS_MAX_ENRICH               max IPs to enrich per run   (default: 25 → 100/month budget)
   CENSYS_SLEEP_BETWEEN_LOOKUPS    seconds between API calls   (default: 1.0)
+    CENSYS_PRIORITY_CATEGORIES      comma-list to prioritise (default: E,L,F,H)
+    CENSYS_PRIORITY_PORTS           comma-list to prioritise (default: 1080,3128,8080,25,7547,23,2323,554)
+    CENSYS_PRIORITY_DEVICE_TYPES    comma-list to prioritise (default: router,camera,iot)
   CENSYS_DRY_RUN                  "1" → print IPs, skip API
 
 Future: search mode (Starter plan)
@@ -65,6 +68,12 @@ from .poll_shodan import _monday_of_week, infer_device_type
 _CENSYS_V3_BASE  = "https://api.platform.censys.io/v3/global"
 _CENSYS_HOST_URL = f"{_CENSYS_V3_BASE}/asset/host/{{ip}}"
 _DEFAULT_TIMEOUT = 20    # seconds per request
+
+
+def _csv_env_list(name: str, default: str) -> list[str]:
+    """Read a comma-separated env var into a clean list of strings."""
+    raw = os.environ.get(name, default)
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +237,25 @@ def _normalise_v3_host(
                 "expires": (cert.get("validity") or {}).get("end"),
             }
 
+        # extended_service_name is more specific than protocol
+        # e.g. "SQUID_HTTP_PROXY", "TINYPROXY", "DROPBEAR_SSH"
+        extended_svc   = svc.get("extended_service_name") or ""
+
+        # software[] — Censys per-service fingerprints: [{product, vendor, version}]
+        # join all product names so infer_device_type can match on them
+        software_strs: list[str] = [
+            " ".join(filter(None, [s.get("vendor"), s.get("product"), s.get("version")]))
+            for s in (svc.get("software") or [])
+        ]
+        software_combined = " ".join(software_strs)
+
+        # Build an enriched product string: protocol + extended name + software
+        product_enriched = " ".join(filter(None, [
+            protocol, extended_svc, software_combined,
+        ])) or None
+
         device_type = infer_device_type(
-            product=protocol,
+            product=product_enriched,
             http_server=http_server,
             http_title=http_title,
             banner=banner,
@@ -259,8 +285,13 @@ def _normalise_v3_host(
             "raw_data":       {"censys_v3": svc},
         })
 
-    # No services found — still record that we checked
+    # No services found — still record that we checked.
+    # Infer device_type from host-level labels alone (may still give proxy/camera/etc.)
     if not records:
+        host_device_type = infer_device_type(
+            product=None, http_server=None, http_title=None,
+            banner=None, port=None, tags=labels,
+        )
         records.append({
             "source":         "censys",
             "snapshot_week":  snapshot_week,
@@ -271,6 +302,7 @@ def _normalise_v3_host(
             "asn":            asn_int,
             "org":            org,
             "tags":           labels,
+            "device_type":    host_device_type,
             "query_ids":      ["censys_enrich"],
             "query_category": "censys",
             "raw_data":       {"censys_v3_checked": True},
@@ -283,29 +315,71 @@ def _normalise_v3_host(
 # Helper: fetch IPs to enrich from device_records (Shodan rows this week)
 # ---------------------------------------------------------------------------
 
-def _get_shodan_ips_this_week(snapshot_week: date, limit: int) -> list[str]:
+def _get_shodan_ips_this_week(
+    snapshot_week: date,
+    limit: int,
+    primary_categories: list[str],
+    priority_ports: list[int],
+    priority_device_types: list[str],
+) -> list[str]:
     """Return up to `limit` distinct Shodan IPs for this week,
-    prioritising high-value categories (E=proxy, F=botnet, L=combos)."""
+    prioritising research-novelty signals (proxy/botnet/spam/combos)."""
+    if not primary_categories:
+        primary_categories = ["E", "L", "F", "H"]
+    if not priority_ports:
+        priority_ports = [-1]
+    if not priority_device_types:
+        priority_device_types = ["router", "camera", "iot"]
+
     from . import db as _db
     with _db.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT ip FROM (
-                  SELECT DISTINCT ip,
-                    CASE
-                      WHEN query_category = ANY(ARRAY['E','L','F']) THEN 0
-                      WHEN query_category = ANY(ARRAY['B','C','H']) THEN 1
-                      ELSE 2
-                    END AS priority
+                SELECT ip
+                FROM (
+                  SELECT
+                    ip,
+                    MIN(
+                      CASE
+                        WHEN query_category = ANY(%s) THEN 0
+                        WHEN query_category = ANY(ARRAY['B','C','A','I']) THEN 1
+                        ELSE 2
+                      END
+                    ) AS category_priority,
+                    MIN(
+                      CASE
+                        WHEN port = ANY(%s) THEN 0
+                        ELSE 1
+                      END
+                    ) AS port_priority,
+                    MAX(
+                      CASE
+                        WHEN device_type = ANY(%s) THEN 1
+                        ELSE 0
+                      END
+                    ) AS has_iot_type,
+                    COUNT(*) AS evidence_rows
                   FROM device_records
                   WHERE source = 'shodan'
                     AND snapshot_week = %s
-                  ORDER BY priority, ip
-                  LIMIT %s
+                  GROUP BY ip
                 ) AS ranked
+                ORDER BY
+                  category_priority,
+                  port_priority,
+                  has_iot_type DESC,
+                  evidence_rows DESC,
+                  ip
+                LIMIT %s
                 """,
-                (str(snapshot_week), limit),
+                (
+                    primary_categories,
+                    priority_ports,
+                    priority_device_types,
+                    str(snapshot_week),
+                    limit,
+                ),
             )
             return [row[0] for row in cur.fetchall()]
 
@@ -338,6 +412,19 @@ def poll_censys(
     dry_run    = os.environ.get("CENSYS_DRY_RUN", "0") == "1"
     max_enrich = int(os.environ.get("CENSYS_MAX_ENRICH", "40"))
     sleep_s    = float(os.environ.get("CENSYS_SLEEP_BETWEEN_LOOKUPS", "1.0"))
+    primary_categories = _csv_env_list("CENSYS_PRIORITY_CATEGORIES", "E,L,F,H")
+    priority_ports = [
+        int(p)
+        for p in _csv_env_list(
+            "CENSYS_PRIORITY_PORTS",
+            "1080,3128,8080,25,7547,23,2323,554",
+        )
+        if p.isdigit()
+    ]
+    priority_device_types = _csv_env_list(
+        "CENSYS_PRIORITY_DEVICE_TYPES",
+        "router,camera,iot",
+    )
 
     snapshot_week = snapshot_week or _monday_of_week()
     snapshot_date = date.today()
@@ -348,9 +435,18 @@ def poll_censys(
     logger.info(
         f"poll_censys enrich | snapshot_week={snapshot_week}"
         f" | max_enrich={max_enrich}"
+        f" | focus_categories={primary_categories}"
+        f" | focus_ports={priority_ports}"
+        f" | focus_device_types={priority_device_types}"
     )
 
-    ips = _get_shodan_ips_this_week(snapshot_week, max_enrich)
+    ips = _get_shodan_ips_this_week(
+        snapshot_week,
+        max_enrich,
+        primary_categories,
+        priority_ports,
+        priority_device_types,
+    )
     if not ips:
         logger.warning(
             "poll_censys: no Shodan IPs found for this week — "

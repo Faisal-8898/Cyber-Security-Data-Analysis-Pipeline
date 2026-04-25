@@ -49,6 +49,12 @@ def _run_poll_censys() -> int:
     return poll_censys()
 
 
+def _run_poll_feeds() -> int:
+    from .poll_feeds import poll_feeds
+    poll_feeds()
+    return 0
+
+
 def _run_aggregate_churn() -> int:
     from . import db as _db
     n = _db.aggregate_churn()
@@ -74,6 +80,7 @@ _INGEST_TASKS = {
 _POLL_TASKS = {
     "poll_shodan":  _run_poll_shodan,
     "poll_censys":  _run_poll_censys,
+    "poll_feeds":   _run_poll_feeds,
 }
 
 _GRAPH_TASKS = {

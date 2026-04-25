@@ -1,25 +1,23 @@
-"""scripts/censys_balance.py — Validate Censys credentials and show credit info.
+"""scripts/censys_balance.py — Show Censys credit balance using the Platform API v3.
 
 Usage:  .venv/bin/python3 scripts/censys_balance.py
         make censys-balance
 
-Note: The Censys Platform API v3 does not expose a credits-remaining endpoint.
-Credit balance (Free: 100/month) must be checked at:
-  https://app.censys.io/account
-
-This script validates the Bearer token by looking up a well-known public IP
-(1.1.1.1 — Cloudflare DNS) and prints what the token can access.
+Uses the official Account Management endpoint (costs 0 credits):
+  GET https://api.platform.censys.io/v3/accounts/users/credits
+Docs: https://docs.censys.com/reference/v3-accountmanagement-user-credits
 """
 import os
 import sys
+from datetime import date
 
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-_V3_HOST_URL = "https://api.platform.censys.io/v3/global/asset/host/{ip}"
-_TEST_IP     = "1.1.1.1"   # Cloudflare — always indexed, costs 1 credit
+_CREDITS_URL       = "https://api.platform.censys.io/v3/accounts/users/credits"
+_CREDITS_USAGE_URL = "https://api.platform.censys.io/v3/accounts/users/credits/usage"
 
 api_secret = os.environ.get("CENSYS_API_SECRET", "").strip()
 if not api_secret:
@@ -35,15 +33,12 @@ headers = {
     "Authorization": f"Bearer {api_secret}",
 }
 
-print(f"Testing Censys Platform API v3 with a host lookup of {_TEST_IP} (costs 1 credit)...")
-resp = requests.get(
-    _V3_HOST_URL.format(ip=_TEST_IP),
-    headers=headers,
-    timeout=15,
-)
+# ── Credit balance (free endpoint — costs 0 credits) ──────────────────────────
+print("Fetching Censys credit balance (Platform API v3, Account Management)...")
+resp = requests.get(_CREDITS_URL, headers=headers, timeout=15)
 
 print(f"{'─'*58}")
-print(f"  API endpoint : GET /v3/global/asset/host/{_TEST_IP}")
+print(f"  API endpoint : GET /v3/accounts/users/credits")
 print(f"  Token prefix : {api_secret[:14]}...")
 print(f"  HTTP status  : {resp.status_code}")
 
@@ -52,33 +47,55 @@ if resp.status_code == 401:
     sys.exit(1)
 
 if resp.status_code == 403:
-    print("  Auth result  : ❌  FORBIDDEN — token may lack host-lookup permission", file=sys.stderr)
+    print("  Auth result  : ❌  FORBIDDEN — token may lack API access permission", file=sys.stderr)
     sys.exit(1)
 
-if not resp.ok and resp.status_code != 404:
-    print(f"  Auth result  : ❌  {resp.status_code}: {resp.text[:120]}", file=sys.stderr)
+if resp.status_code == 404:
+    print("  Auth result  : ❌  USER NOT FOUND — token may be invalid or revoked", file=sys.stderr)
     sys.exit(1)
 
-print("  Auth result  : ✅  VALID — Bearer token accepted by Platform API v3")
+if not resp.ok:
+    print(f"  Auth result  : ❌  {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+    sys.exit(1)
 
-if resp.ok:
-    data     = resp.json()
-    resource = (data.get("result") or {}).get("resource") or {}
-    asn_info = resource.get("autonomous_system") or {}
-    loc      = resource.get("location") or {}
-    services = resource.get("services") or []
-    print(f"  Test IP      : {resource.get('ip', _TEST_IP)}")
-    print(f"  Country      : {loc.get('country_code','?')}")
-    print(f"  ASN          : AS{asn_info.get('asn','?')} — {asn_info.get('name','?')}")
-    print(f"  Open ports   : {[s.get('port') for s in services]}")
-else:
-    print(f"  Note         : {_TEST_IP} returned 404 (not indexed) — auth still valid")
+data = resp.json()
+# Response shape: { "result": { "allowance": int, "used": int, "remaining": int,
+#                               "refresh_date": "YYYY-MM-DD", ... } }
+result     = data.get("result") or data  # some versions return the object directly
+allowance  = result.get("allowance",   result.get("total_credits",   "?"))
+used       = result.get("used",        result.get("credits_used",    "?"))
+remaining  = result.get("remaining",   result.get("credits_remaining","?"))
+refresh    = result.get("refresh_date", result.get("refresh_at",     "?"))
+
+print(f"  Auth result  : ✅  VALID — Bearer token accepted")
+print(f"{'─'*58}")
+print(f"  Plan allowance : {allowance} credits / month")
+print(f"  Credits used   : {used}")
+print(f"  Credits left   : {remaining}")
+print(f"  Refresh date   : {refresh}")
+
+# ── Monthly usage breakdown ────────────────────────────────────────────────────
+today      = date.today()
+month_start = today.replace(day=1).isoformat()
+usage_resp = requests.get(
+    _CREDITS_USAGE_URL,
+    headers=headers,
+    params={"start_date": month_start, "granularity": "monthly"},
+    timeout=15,
+)
+if usage_resp.ok:
+    usage_data = usage_resp.json()
+    entries = (usage_data.get("result") or usage_data).get("usage", [])
+    if entries:
+        print(f"{'─'*58}")
+        print(f"  Monthly usage breakdown (from {month_start}):")
+        for entry in entries:
+            print(f"    {entry.get('date', entry.get('period','?'))} : {entry.get('credits_used', entry.get('used','?'))} credits used")
 
 print(f"{'─'*58}")
-print("  Credit balance is NOT available via the API (Platform API v3).")
-print("  Check your remaining credits at: https://app.censys.io/account")
-print(f"  Free plan budget: 100 credits/month | CENSYS_MAX_ENRICH=80 (default)")
+max_enrich = int(os.environ.get("CENSYS_MAX_ENRICH", "40"))
+print(f"  Current CENSYS_MAX_ENRICH : {max_enrich} IPs/run")
+print(f"  Budget reminder (Free = 100 cr/month):")
+print(f"    {max_enrich} IPs × 1 cr/IP × 4 weeks = {max_enrich * 4} cr/month")
+print(f"    To use ALL credits: make poll-censys-max  (sets CENSYS_MAX_ENRICH=100)")
 print(f"{'─'*58}")
-print(f"  Budget reminder (Free plan = 100 credits/month):")
-print(f"    64 queries × 1 credit = 64 credits/month  ✅")
-print(f"{'─'*48}")
