@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS honeypot_events (
     user_agent      TEXT,
     http_path       TEXT,
     pipeline_run_id UUID,                  -- logical ref to pipeline_runs(run_id)
+    raw_file_path   TEXT,                  -- source file on disk (dedup key part 1)
+    raw_line_number INT,                   -- line number in that file (dedup key part 2)
     raw_data        JSONB        NOT NULL DEFAULT '{}'
 ) PARTITION BY RANGE (event_time);
 
@@ -70,6 +72,11 @@ CREATE INDEX IF NOT EXISTS idx_he_source_ip   ON honeypot_events (source_ip);
 CREATE INDEX IF NOT EXISTS idx_he_type        ON honeypot_events (honeypot, event_type);
 CREATE INDEX IF NOT EXISTS idx_he_session     ON honeypot_events (session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_he_run         ON honeypot_events (pipeline_run_id) WHERE pipeline_run_id IS NOT NULL;
+-- Dedup index: (file path + line number) uniquely identifies a source log line.
+-- Partitioned unique indexes must include the partition key (event_time).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_he_dedup
+    ON honeypot_events (raw_file_path, raw_line_number, event_time)
+    WHERE raw_file_path IS NOT NULL AND raw_line_number IS NOT NULL;
 
 -- ---------------------------------------------------------------
 -- 3. SOURCE IP METADATA

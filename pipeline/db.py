@@ -137,6 +137,8 @@ def store_events(events: list[dict]) -> int:
             e.get("user_agent"),
             e.get("http_path"),
             e.get("pipeline_run_id"),
+            e.get("raw_file_path"),
+            e.get("raw_line_number"),
             psycopg2.extras.Json(e.get("raw_data", {})),
         )
         for e in events
@@ -153,8 +155,11 @@ def store_events(events: list[dict]) -> int:
                     username, password, command_str,
                     download_url, file_hash, hassh,
                     user_agent, http_path,
-                    pipeline_run_id, raw_data
+                    pipeline_run_id, raw_file_path, raw_line_number, raw_data
                 ) VALUES %s
+                ON CONFLICT (raw_file_path, raw_line_number, event_time)
+                    WHERE raw_file_path IS NOT NULL AND raw_line_number IS NOT NULL
+                DO NOTHING
                 """,
                 rows,
             )
@@ -393,3 +398,187 @@ def get_completed_query_ids(source: str, snapshot_week: str) -> set[str]:
                 (source, str(snapshot_week)),
             )
             return {row[0] for row in cur.fetchall()}
+
+
+# ---------------------------------------------------------------
+# Daily churn aggregation  (T07)
+# ---------------------------------------------------------------
+
+def aggregate_churn(day: Optional[str] = None) -> int:
+    """
+    Aggregate honeypot_events for *day* (ISO8601 date string, default: yesterday)
+    into ip_activity_daily.  Safe to re-run — uses ON CONFLICT DO UPDATE.
+
+    Returns the number of rows inserted or updated.
+    """
+    import datetime as _dt
+    if day is None:
+        day = (
+            _dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=1)
+        ).isoformat()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ip_activity_daily
+                    (day, source_ip, honeypot,
+                     event_count, login_attempts, unique_sessions,
+                     first_event, last_event)
+                SELECT
+                    event_time::DATE            AS day,
+                    source_ip,
+                    honeypot,
+                    COUNT(*)                    AS event_count,
+                    COUNT(*) FILTER (
+                        WHERE event_type LIKE 'login%%'
+                    )                           AS login_attempts,
+                    COUNT(DISTINCT session_id)  AS unique_sessions,
+                    MIN(event_time)             AS first_event,
+                    MAX(event_time)             AS last_event
+                FROM honeypot_events
+                WHERE event_time::DATE = %s::DATE
+                  AND source_ip IS NOT NULL
+                GROUP BY event_time::DATE, source_ip, honeypot
+                ON CONFLICT (day, source_ip, honeypot) DO UPDATE SET
+                    event_count     = EXCLUDED.event_count,
+                    login_attempts  = EXCLUDED.login_attempts,
+                    unique_sessions = EXCLUDED.unique_sessions,
+                    first_event     = EXCLUDED.first_event,
+                    last_event      = EXCLUDED.last_event
+                """,
+                (day,),
+            )
+            return cur.rowcount
+
+
+# ---------------------------------------------------------------
+# Graph nodes / edges / campaign clusters  (T10, T11)
+# ---------------------------------------------------------------
+
+def upsert_graph_nodes(nodes: list[dict]) -> dict[str, int]:
+    """
+    Insert or update graph_nodes.
+    Returns {node_value: id} mapping for edge-building.
+    """
+    if not nodes:
+        return {}
+
+    rows = [
+        (
+            n["node_type"],
+            n["node_value"],
+            n.get("first_seen"),
+            n.get("last_seen"),
+            n.get("cluster_id"),
+            psycopg2.extras.Json(n.get("metadata") or {}),
+        )
+        for n in nodes
+    ]
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO graph_nodes
+                    (node_type, node_value, first_seen, last_seen, cluster_id, metadata)
+                VALUES %s
+                ON CONFLICT (node_value) DO UPDATE SET
+                    last_seen  = GREATEST(graph_nodes.last_seen, EXCLUDED.last_seen),
+                    cluster_id = COALESCE(EXCLUDED.cluster_id, graph_nodes.cluster_id),
+                    metadata   = EXCLUDED.metadata
+                RETURNING id, node_value
+                """,
+                rows,
+                fetch=True,
+            )
+            return {row[1]: row[0] for row in cur.fetchall()}
+
+
+def upsert_graph_edges(edges: list[dict]) -> int:
+    """Insert or update graph_edges. Returns row count."""
+    if not edges:
+        return 0
+
+    rows = [
+        (
+            e["source_node_id"],
+            e["target_node_id"],
+            e["edge_type"],
+            e.get("weight", 1.0),
+            e.get("first_seen"),
+            e.get("last_seen"),
+            psycopg2.extras.Json(e.get("evidence") or {}),
+        )
+        for e in edges
+    ]
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO graph_edges
+                    (source_node_id, target_node_id, edge_type,
+                     weight, first_seen, last_seen, evidence)
+                VALUES %s
+                ON CONFLICT (source_node_id, target_node_id, edge_type) DO UPDATE SET
+                    weight    = EXCLUDED.weight,
+                    last_seen = EXCLUDED.last_seen,
+                    evidence  = EXCLUDED.evidence
+                """,
+                rows,
+            )
+            return cur.rowcount
+
+
+def upsert_campaign_clusters(clusters: list[dict]) -> int:
+    """Insert or update campaign_clusters. Returns row count."""
+    if not clusters:
+        return 0
+
+    rows = [
+        (
+            c["cluster_id"],
+            c.get("name"),
+            c.get("first_seen"),
+            c.get("last_seen"),
+            c.get("active", True),
+            c.get("event_count", 0),
+            c.get("source_ip_count", 0),
+            c.get("primary_protocol"),
+            c.get("primary_creds") or [],
+            c.get("c2_ips") or [],
+            c.get("c2_domains") or [],
+            c.get("malware_hashes") or [],
+            psycopg2.extras.Json(c.get("metadata") or {}),
+        )
+        for c in clusters
+    ]
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO campaign_clusters
+                    (cluster_id, name, first_seen, last_seen, active,
+                     event_count, source_ip_count, primary_protocol,
+                     primary_creds, c2_ips, c2_domains, malware_hashes,
+                     metadata)
+                VALUES %s
+                ON CONFLICT (cluster_id) DO UPDATE SET
+                    last_seen       = GREATEST(campaign_clusters.last_seen, EXCLUDED.last_seen),
+                    active          = EXCLUDED.active,
+                    event_count     = EXCLUDED.event_count,
+                    source_ip_count = EXCLUDED.source_ip_count,
+                    primary_creds   = EXCLUDED.primary_creds,
+                    c2_ips          = EXCLUDED.c2_ips,
+                    c2_domains      = EXCLUDED.c2_domains,
+                    malware_hashes  = EXCLUDED.malware_hashes,
+                    metadata        = EXCLUDED.metadata
+                """,
+                rows,
+            )
+            return cur.rowcount

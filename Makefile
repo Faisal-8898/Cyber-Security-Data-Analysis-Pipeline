@@ -1,8 +1,10 @@
-.PHONY: db-up db-down db-reset db-migrate install test test-all run check-db \
+.PHONY: db-up db-down db-reset db-migrate venv install test test-all cov run check-db \
         poll-shodan poll-censys poll run-ingest run-extract \
         poll-shodan-resume poll-shodan-from \
         poll-censys-resume poll-censys-from \
-        check-balance censys-balance censys-test query-summary
+        check-balance censys-balance censys-test query-summary \
+        aggregate-churn aggregate-churn-date \
+        build-graph build-graph-dry graph-only cluster
 
 # ─── Docker PostgreSQL ────────────────────────────────────────────────────────
 
@@ -35,22 +37,28 @@ db-migrate:
 
 # ─── Python environment ──────────────────────────────────────────────────────
 
+# Create venv with Python 3.12 (system default) and install all dependencies
+venv:
+	python3.12 -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements.txt
+
 install:
-	pip install -r requirements.txt
+	.venv/bin/pip install -r requirements.txt
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 
 # Unit tests only (no DB required)
 test:
-	pytest -m "not integration"
+	.venv/bin/pytest -m "not integration"
 
 # Unit + integration tests (DB must be running)
 test-all:
-	pytest
+	.venv/bin/pytest
 
 # Coverage report
 cov:
-	pytest -m "not integration" --cov=pipeline --cov-report=term-missing
+	.venv/bin/pytest -m "not integration" --cov=pipeline --cov-report=term-missing
 
 # ─── Pipeline ────────────────────────────────────────────────────────────────
 
@@ -119,3 +127,32 @@ censys-test:
 # Print per-category query counts and monthly credit budget
 query-summary:
 	@.venv/bin/python3 scripts/query_summary.py
+
+# ─── Daily churn aggregation (T07) ────────────────────────────────────────────
+
+# Aggregate yesterday's honeypot_events into ip_activity_daily
+aggregate-churn:
+	.venv/bin/python3 -m pipeline.run --tasks aggregate_churn
+
+# Aggregate a specific date, e.g.: make aggregate-churn-date DAY=2026-04-10
+aggregate-churn-date:
+	@test -n "$(DAY)" || (echo "Usage: make aggregate-churn-date DAY=YYYY-MM-DD"; exit 1)
+	CHURN_DAY=$(DAY) .venv/bin/python3 -m pipeline.run --tasks aggregate_churn
+
+# ─── Graph build + campaign clustering (T10, T11) ────────────────────────────
+
+# Dry-run: build graph in memory, print stats, do NOT write to DB or disk
+build-graph-dry:
+	GRAPH_DRY_RUN=1 .venv/bin/python3 -m pipeline.run --tasks build_graph,cluster
+
+# Real run (Sunday 04:00 UTC — after Shodan/Censys poll at 02:00)
+build-graph:
+	.venv/bin/python3 -m pipeline.run --tasks build_graph,cluster
+
+# Graph only, no clustering (useful for debugging)
+graph-only:
+	.venv/bin/python3 -m pipeline.run --tasks build_graph
+
+# Campaign clustering only (uses existing graph_nodes cluster_id column)
+cluster:
+	.venv/bin/python3 -m pipeline.run --tasks cluster

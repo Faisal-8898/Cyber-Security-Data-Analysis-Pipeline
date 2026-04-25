@@ -61,4 +61,15 @@ CREATE TABLE IF NOT EXISTS shodan_query_runs (
     UNIQUE (source, snapshot_week, query_id)
 );
 
+-- Step 7: Add dedup columns to honeypot_events
+-- These allow ON CONFLICT DO NOTHING to prevent duplicate ingestion.
+ALTER TABLE honeypot_events ADD COLUMN IF NOT EXISTS raw_file_path   TEXT;
+ALTER TABLE honeypot_events ADD COLUMN IF NOT EXISTS raw_line_number INT;
+
+-- Dedup index: (file + line + event_time). event_time must be included because
+-- PostgreSQL requires unique indexes on partitioned tables to include partition key.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_he_dedup
+    ON honeypot_events (raw_file_path, raw_line_number, event_time)
+    WHERE raw_file_path IS NOT NULL AND raw_line_number IS NOT NULL;
+
 \echo 'Migration v2 complete.'

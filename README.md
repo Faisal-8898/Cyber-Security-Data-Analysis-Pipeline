@@ -1,31 +1,164 @@
-# cs-data-pipeline
+# IoT Honeypot Research Pipeline
 
-IoT honeypot data pipeline for IEEE IoT Journal research.  
-Collects from Cowrie + OpenCanary honeypot logs, extracts IOCs, and performs
-**weekly Shodan + Censys snapshots** for longitudinal IoT device exposure measurement.
+Collects honeypot events (Cowrie + OpenCanary + Glutton), extracts IOCs, runs weekly Shodan/Censys snapshots, builds an attacker graph, and clusters campaigns. Feeds an IEEE IoT-J paper on IoT compromise → monetization infrastructure.
+
+**Architecture**: VPS = pure sensor (logs only). Local machine = PostgreSQL + pipeline + analysis.
 
 ---
 
-## Quick Start
+## Setup (one-time)
 
 ```bash
-# 1. Copy env file and fill in values
+# 1. Python 3.12 venv
+make venv
+
+# 2. Copy env and fill in values
 cp .env.example .env
+# Required: DATABASE_URL, SHODAN_API_KEY, CENSYS_API_SECRET
+# Optional: COWRIE_LOG_PATH, OPENCANARY_LOG_PATH (override /data/raw-logs/ defaults)
 
-# 2. Install Python dependencies
-make install
-
-# 3. Start PostgreSQL (Docker, port 5453)
+# 3. Start PostgreSQL (Docker on port 5453)
 make db-up
 
-# 4. Verify DB connection
+# 4. Smoke-test DB
 make check-db
+```
 
-# 5. Run full pipeline (honeypot ingest + IOC extract)
-make run
+> Full VPS build → [Docs/VPS_SETUP.md](Docs/VPS_SETUP.md)  
+> Log sync setup → [Docs/DATA_PULL.md](Docs/DATA_PULL.md)
 
-# 6. Run Shodan + Censys weekly poll  ← new
-make poll
+---
+
+## Make Targets
+
+### Database
+
+| Target | What it does |
+|---|---|
+| `make db-up` | Start Docker PostgreSQL (port 5453) |
+| `make db-down` | Stop container |
+| `make db-reset` | Drop + recreate (fresh schema from `init.sql`) |
+| `make db-migrate` | Apply `migrate_v2.sql` to an existing DB |
+| `make check-db` | Verify DB connectivity |
+
+### Python Environment
+
+| Target | What it does |
+|---|---|
+| `make venv` | Create `.venv` with Python 3.12 and install all deps |
+| `make install` | Re-install deps into existing `.venv` |
+
+### Tests
+
+| Target | What it does |
+|---|---|
+| `make test` | Unit tests (no DB required) |
+| `make test-all` | Unit + integration tests (DB must be running) |
+| `make cov` | Coverage report |
+
+### Pipeline
+
+| Target | What it does |
+|---|---|
+| `make run` | Full pipeline: ingest + extract IOCs |
+| `make run-ingest` | Ingest honeypot logs only |
+| `make run-extract` | Extract IOCs from already-ingested events |
+| `make aggregate-churn` | Aggregate yesterday into `ip_activity_daily` |
+| `make aggregate-churn-date DAY=2026-04-10` | Aggregate a specific date |
+
+### Shodan / Censys
+
+| Target | What it does |
+|---|---|
+| `make poll` | Shodan + Censys both (weekly — consumes credits) |
+| `make poll-shodan` | Shodan weekly snapshot |
+| `make poll-censys` | Censys weekly enrichment |
+| `make poll-shodan-dry` | Print all 40 queries, zero API calls |
+| `make poll-censys-dry` | Print all Censys queries, zero API calls |
+| `make poll-shodan-resume` | Resume crashed poll (skips completed queries) |
+| `make poll-shodan-from FROM=E` | Resume from a specific category/query_id |
+| `make poll-censys-resume` | Resume crashed Censys enrichment |
+| `make poll-censys-from FROM=20` | Resume Censys from a specific IP index |
+| `make check-balance` | Remaining Shodan API credits |
+| `make censys-balance` | Remaining Censys API credits |
+| `make query-summary` | Per-category query counts + monthly credit budget |
+
+### Graph / Clustering
+
+| Target | What it does |
+|---|---|
+| `make build-graph` | Build NetworkX graph + cluster campaigns |
+| `make build-graph-dry` | Dry run — stats only, no DB writes |
+| `make graph-only` | Graph build only, skip clustering |
+| `make cluster` | Campaign clustering only |
+
+---
+
+## CLI Reference
+
+```bash
+.venv/bin/python3 -m pipeline.run --tasks ingest,extract
+.venv/bin/python3 -m pipeline.run --tasks ingest_cowrie
+.venv/bin/python3 -m pipeline.run --tasks ingest_opencanary
+.venv/bin/python3 -m pipeline.run --tasks poll_shodan
+.venv/bin/python3 -m pipeline.run --tasks poll_censys
+.venv/bin/python3 -m pipeline.run --tasks poll
+.venv/bin/python3 -m pipeline.run --tasks aggregate_churn
+.venv/bin/python3 -m pipeline.run --tasks build_graph,cluster
+.venv/bin/python3 -m pipeline.run --tasks all
+```
+
+---
+
+## Cron Schedule (local machine)
+
+```cron
+# Pull logs every 30 min
+*/30 * * * *  rsync -az --quiet -e "ssh -p 2222 -i ~/.ssh/research_key" \
+    cowrie@167.172.187.18:/home/cowrie/cowrie/var/log/cowrie/ \
+    /data/raw-logs/cowrie/ >> /var/log/iot-pipeline/sync.log 2>&1
+
+*/30 * * * *  rsync -az --quiet -e "ssh -p 2222 -i ~/.ssh/research_key" \
+    cowrie@167.172.187.18:/var/tmp/opencanary.log \
+    /data/raw-logs/opencanary/ >> /var/log/iot-pipeline/sync.log 2>&1
+
+*/30 * * * *  rsync -az --quiet -e "ssh -p 2222 -i ~/.ssh/research_key" \
+    cowrie@167.172.187.18:/var/tmp/glutton.log \
+    /data/raw-logs/glutton/ >> /var/log/iot-pipeline/sync.log 2>&1
+
+# Ingest + extract (5-min offset lets rsync finish first)
+5,35 * * * *  cd /path/to/pipeline && .venv/bin/python3 -m pipeline.run \
+    --tasks ingest,extract >> /var/log/iot-pipeline/run.log 2>&1
+
+# Daily churn aggregation: 01:00 UTC
+0 1 * * *     cd /path/to/pipeline && .venv/bin/python3 -m pipeline.run \
+    --tasks aggregate_churn >> /var/log/iot-pipeline/daily.log 2>&1
+
+# Shodan + Censys: Sunday 02:00 UTC
+0 2 * * 0     cd /path/to/pipeline && .venv/bin/python3 -m pipeline.run \
+    --tasks poll >> /var/log/iot-pipeline/weekly.log 2>&1
+
+# Graph + clustering: Sunday 04:00 UTC
+0 4 * * 0     cd /path/to/pipeline && .venv/bin/python3 -m pipeline.run \
+    --tasks build_graph,cluster >> /var/log/iot-pipeline/weekly.log 2>&1
+```
+
+---
+
+## `.env` Variables
+
+```dotenv
+DATABASE_URL=postgresql://pipeline:pipepipe@localhost:5453/iot_research
+
+COWRIE_LOG_PATH=/data/raw-logs/cowrie/cowrie.json
+OPENCANARY_LOG_PATH=/data/raw-logs/opencanary/opencanary.log
+
+SHODAN_API_KEY=your_key_here
+CENSYS_API_SECRET=censys_xxxxxxxx_your_token
+
+# Optional
+PIPELINE_LOG_DIR=/var/log/iot-pipeline
+PIPELINE_STATE_DIR=/var/lib/iot-pipeline
 ```
 
 ---
@@ -33,223 +166,63 @@ make poll
 ## Project Structure
 
 ```
-infra/
-  docker-compose.yml    # PostgreSQL 16 on port 5453
-  init.sql              # Full schema (auto-applied on first DB start)
-  migrate_v2.sql        # Migration for existing DBs (adds Shodan/Censys columns)
-
 pipeline/
-  core.py               # @task decorator, logger, git version
+  core.py               # @task decorator, logger, git hash
   schema.py             # NormalizedEvent TypedDict
-  bookmark.py           # Incremental log reader (byte-offset tracking)
-  db.py                 # PostgreSQL helpers (insert, upsert, device records)
-  ingest_cowrie.py      # Parse Cowrie SSH/Telnet JSON logs
-  ingest_opencanary.py  # Parse OpenCanary multi-protocol logs
-  extract_iocs.py       # Extract IPs, URLs, hashes, credentials
-  poll_shodan.py        # Shodan weekly snapshot (44 queries, categories A–L)
-  poll_censys.py        # Censys weekly snapshot (Bearer token or API ID+Secret)
+  bookmark.py           # Incremental reads (byte-offset + inode rotation guard)
+  db.py                 # All PostgreSQL helpers
+  ingest_cowrie.py      # Cowrie SSH/Telnet JSON parser
+  ingest_opencanary.py  # OpenCanary multi-protocol parser
+  extract_iocs.py       # IP, URL, SHA256, MD5, domain, credential, HASSH
+  poll_shodan.py        # Shodan snapshot (40 queries, categories A–L)
+  poll_censys.py        # Censys enrichment (host lookup, Bearer auth)
+  build_graph.py        # NetworkX graph + Louvain clustering
   run.py                # CLI entry point
 
-tests/
-  conftest.py
-  fixtures/             # Sample log lines (no live honeypot needed)
+infra/
+  docker-compose.yml    # PostgreSQL 16, port 5453
+  init.sql              # Full schema (auto-applied on first start)
+  migrate_v2.sql        # One-time migration for existing DBs
+
+Docs/
+  VPS_SETUP.md          # Step-by-step VPS build
+  DATA_PULL.md          # SSH key + rsync pull + cron wiring
 ```
 
 ---
 
-## Make Targets
+## Shodan Query Categories
 
-| Target | Description |
-|---|---|
-| `make db-up` | Start Docker PostgreSQL |
-| `make db-down` | Stop container |
-| `make db-reset` | Drop + recreate DB (fresh schema) |
-| `make db-migrate` | Apply v2 migration to existing DB (Shodan/Censys columns) |
-| `make install` | `pip install -r requirements.txt` |
-| `make test` | Unit tests (no DB needed) |
-| `make test-all` | Unit + integration tests (DB required) |
-| `make cov` | Coverage report |
-| `make check-db` | Verify DB connectivity |
-| `make run` | Full pipeline (honeypot ingest + IOC extract) |
-| `make run-ingest` | Ingest honeypot logs only |
-| `make run-extract` | Extract IOCs from last ingest only |
-| `make poll` | Run Shodan + Censys both (consumes credits) |
-| `make poll-shodan` | Run Shodan weekly poll only |
-| `make poll-censys` | Run Censys weekly poll only |
-| `make poll-shodan-dry` | Dry run: print all 44 Shodan queries, zero API calls |
-| `make poll-censys-dry` | Dry run: print all Censys queries, zero API calls |
+| Cat | Focus | Paper section |
+|-----|-------|---------------|
+| A | IoT port baseline | RQ1, Table 1 |
+| B | Router fingerprints | RQ1+RQ2 |
+| C | IP cameras / surveillance | RQ1, Fig. 3 |
+| E | Proxy / monetization **(core)** | RQ3, Fig. 7 |
+| F | Botnet / infection signals | RQ1+RQ4 |
+| H | SMTP open relay | RQ3 |
+| I | Geographic bias control | Sections 6+11 |
+| L | High-risk combo cluster seeds | RQ4 |
+
+Full list: `pipeline/poll_shodan.py:SHODAN_QUERIES`
 
 ---
 
-## Honeypot Log Sources
+## Checklist
 
-Logs are rsync'd from the VPS sensor to `/data/raw-logs/` before each run.
-Override paths via env vars:
-
-| Env var | Default |
-|---|---|
-| `COWRIE_LOG_PATH` | `/data/raw-logs/cowrie/cowrie.json` |
-| `OPENCANARY_LOG_PATH` | `/data/raw-logs/opencanary/opencanary.log` |
-
----
-
-## Shodan + Censys Setup
-
-### 1. Get API credentials
-
-**Shodan**
-- Free API key: https://account.shodan.io → *My Account* → copy **API Key**
-- Free tier gives ~100 results/query, 1 search credit/query
-
-**Censys — personal token (most common)**
-- Go to https://search.censys.io/account/api
-- Copy your **API Secret** (format: `censys_xxxxxxxx_...`)
-- No API ID is needed — set only `CENSYS_API_SECRET`; the pipeline uses Bearer token auth
-
-**Censys — service account**
-- If you have an API ID + secret pair: set both `CENSYS_API_ID` and `CENSYS_API_SECRET`
-- The pipeline auto-detects: if `CENSYS_API_ID` is set → Basic auth; otherwise → Bearer
-
-### 2. Set environment variables in `.env`
-
-```dotenv
-# Shodan
-SHODAN_API_KEY=your_shodan_api_key_here
-
-# Censys — personal token only (no CENSYS_API_ID needed)
-CENSYS_API_SECRET=censys_xxxxxxxx_your_personal_token
-
-# Censys — service account (set both if you have an API ID)
-# CENSYS_API_ID=your_censys_api_id
-# CENSYS_API_SECRET=your_censys_api_secret
-
-# Optional tuning (safe defaults shown)
-SHODAN_MAX_PER_QUERY=500           # records per query (free tier cap: 100)
-SHODAN_SLEEP_BETWEEN_QUERIES=1.0   # seconds between Shodan queries
-CENSYS_MAX_PER_QUERY=200           # records per query
-CENSYS_SLEEP_BETWEEN_QUERIES=2.0   # seconds between Censys queries
-CENSYS_SLEEP_BETWEEN_PAGES=0.5     # seconds between pagination requests
-```
-
-### 3. Test without spending credits (dry run)
-
-```bash
-# Prints all 44 Shodan query strings — does NOT call the API
-make poll-shodan-dry
-
-# Prints all Censys query strings — does NOT call the API
-make poll-censys-dry
-```
-
-### 4. Run a snapshot poll
-
-```bash
-# Shodan only
-make poll-shodan
-
-# Censys only
-make poll-censys
-
-# Both at once (recommended for the weekly cron)
-make poll
-
-# Or via CLI directly
-python -m pipeline.run --tasks poll_shodan
-python -m pipeline.run --tasks poll_censys
-python -m pipeline.run --tasks poll
-```
-
-### 5. Query catalogue — 44 Shodan + 48 Censys queries (categories A–L)
-
-| Cat | Focus | Example queries |
-|-----|-------|----------------|
-| **A** | IoT device exposure | `port:23`, `port:2323`, `port:22`, `port:8080` |
-| **B** | Router/embedded exploitation | `port:7547`, `"TR-069"`, `"GoAhead-Webs"`, `"Boa"`, `"uhttpd"` |
-| **C** | IP camera / surveillance | `"IP Camera"`, `port:554`, `"RTSP"`, `"DVR"` |
-| **D** | Default credentials / weak auth | `"admin:admin"`, `"default password"`, `"Login Page"` |
-| **E** | Proxy / monetization **(CRITICAL for paper)** | `port:1080`, `port:3128`, `"SOCKS5"`, `"Squid"` |
-| **F** | Botnet / malware signals | `"busybox"`, `"mirai"`, `"dropbear"`, `"/bin/busybox"` |
-| **G** | C2 / suspicious patterns | `"/bin/sh"`, `"cmd.exe"`, `"powershell"`, `"panel"` |
-| **H** | SMTP / spam infrastructure | `port:25`, `"Open Relay"`, `"Postfix"` |
-| **I** | Geographic sampling (bias control) | `country:BD port:23`, `country:CN port:23` |
-| **J** | Vulnerability exposure | `"cve"`, `"vulnerable"`, `"OpenSSH"`, `"Apache"` |
-| **K** | Industrial / IoT protocols | `port:1883` (MQTT), `port:502` (Modbus), `port:5555` (ADB) |
-| **L** | High-risk IoT combos | `port:23 "busybox"`, `port:7547 "TR-069"`, `port:554 "RTSP"` |
-
-> **The query set never changes between weeks** — intentional for longitudinal comparability.  
-> Full lists in `pipeline/poll_shodan.py:SHODAN_QUERIES` and `pipeline/poll_censys.py:CENSYS_QUERIES`.
-
-### 6. Cron schedule
-
-Add to your local crontab (`crontab -e`):
-
-```cron
-# ── Rsync honeypot logs from VPS sensor (every 30 min) ───────────────────────
-5,35 * * * *   rsync -az -e "ssh -p 2222" cowrie@YOUR_VPS:/home/cowrie/var/log/cowrie/cowrie.json /data/raw-logs/cowrie/
-5,35 * * * *   rsync -az -e "ssh -p 2222" root@YOUR_VPS:/var/tmp/opencanary.log /data/raw-logs/opencanary/
-
-# ── Honeypot ingest + IOC extract (every 30 min, 10-min offset) ──────────────
-10,40 * * * *  cd /path/to/cs-data-pipeline && .venv/bin/python -m pipeline.run --tasks ingest,extract >> /tmp/iot-pipeline/logs/cron.log 2>&1
-
-# ── Shodan + Censys weekly snapshot (Sunday 02:00 UTC) ───────────────────────
-0 2 * * 0      cd /path/to/cs-data-pipeline && .venv/bin/python -m pipeline.run --tasks poll >> /tmp/iot-pipeline/logs/shodan_censys.log 2>&1
-```
-
-### 7. Migrate an existing database (schema v2)
-
-Run this once if your database was created before the Shodan/Censys columns were added:
-
-```bash
-# Option A — via Make
-make db-migrate
-
-# Option B — direct psql
-psql "$DATABASE_URL" -f infra/migrate_v2.sql
-```
-
-
----
-
-## Device Records Schema
-
-`device_records` stores one row per `(source, ip, port, snapshot_week)`.
-When the same IP+port is returned by multiple queries in the same week,
-the row is **updated in-place** and `query_ids[]` is merged (array union).
-
-| Column | Description |
-|--------|-------------|
-| `source` | `shodan` or `censys` |
-| `snapshot_week` | Monday of the ISO week — longitudinal anchor |
-| `ip` | Device IP address |
-| `port` | Service port |
-| `device_type` | Inferred: `router` \| `camera` \| `iot` \| `server` \| `unknown` |
-| `query_ids` | All query IDs that matched this `(ip, port)` this week |
-| `query_category` | Primary category letter (A–L) |
-| `tags` | Shodan tags / Censys labels (`iot`, `malware`, `vpn`, …) |
-| `http_title` | HTTP page title — admin panel detection |
-| `http_server` | Server header (`GoAhead`, `Boa`, `uhttpd`, …) |
-| `vulns` | CVE detail map from Shodan |
-| `cve_ids` | CVE ID list |
-| `raw_data` | Compact provenance JSONB |
-
-`shodan_query_runs` records every individual query execution (query string,
-total API hits, records stored, errors) — **full reproducibility guarantee**.
-
-
----
-
-## Implementation Checklist
-
-- [x] PostgreSQL schema (9 core tables + 2 Shodan/Censys tables, monthly partitions)
-- [x] Bookmark-based incremental reads (handles log rotation)
-- [x] Cowrie ingest (login, command, file_download events)
+- [x] PostgreSQL schema (9 tables + monthly partitions)
+- [x] Bookmark-based incremental reads (log rotation safe)
+- [x] Cowrie ingest (login, command, file_download)
 - [x] OpenCanary ingest (FTP, SSH, HTTP, Telnet, port scan)
-- [x] IOC extraction (IP, URL, SHA256, MD5, domain, credentials)
-- [x] Provenance tracking (`pipeline_runs` table, git hash per row)
-- [x] **Shodan weekly poll** (44 queries across categories A–L, `device_type` inference)
-- [x] **Censys weekly poll** (48 queries, personal Bearer token + Basic auth auto-detect)
-- [x] **Multi-query UPSERT** (one row per ip+port+week, `query_ids[]` merged)
-- [x] **`shodan_query_runs`** audit table (per-query reproducibility)
-- [x] **Schema migration v2** (`infra/migrate_v2.sql` for existing DBs)
-- [ ] Graph analysis / campaign clustering (Phase 3)
-- [ ] VPS rsync automation + full cron wiring
+- [x] IOC extraction (IP, URL, SHA256, MD5, domain, credential, HASSH)
+- [x] Provenance tracking (`pipeline_runs`, git hash per row)
+- [x] Shodan weekly poll (40 queries, `device_type` inference)
+- [x] Censys weekly enrichment (host-lookup, Bearer + Basic auto-detect)
+- [x] Multi-query UPSERT (`query_ids[]` merged per ip+port+week)
+- [x] `shodan_query_runs` audit table
+- [x] Schema migration v2
+- [x] Daily churn aggregation (`ip_activity_daily`)
+- [x] NetworkX graph build + Louvain community detection
+- [x] Campaign clustering (`campaign_clusters` UPSERT)
+- [ ] Rsync SSH key wired (see [Docs/DATA_PULL.md](Docs/DATA_PULL.md))
+- [ ] Cron installed on local machine
