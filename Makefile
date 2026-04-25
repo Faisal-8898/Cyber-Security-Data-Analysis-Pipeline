@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-reset db-migrate db-migrate-feeds venv install test test-all cov run check-db \
+.PHONY: db-up db-down db-reset db-migrate db-migrate-feeds export-data import-data venv install test test-all cov run check-db \
         poll-shodan poll-censys poll run-ingest run-extract \
         poll-shodan-resume poll-shodan-from \
         poll-censys-resume poll-censys-from \
@@ -38,6 +38,17 @@ db-migrate:
 		psql "$$DATABASE_URL" -f infra/migrate_v2.sql; \
 	fi
 	@echo "Migration complete."
+
+# Export device_records, pipeline_runs, shodan_query_runs to data/ (Git-tracked)
+# Can be pushed to GitHub and pulled on Mac
+export-data:
+	@chmod +x scripts/export_to_mac.sh
+	@scripts/export_to_mac.sh
+
+# Import device_records, pipeline_runs, shodan_query_runs from data/
+import-data:
+	@chmod +x scripts/import_from_linux.sh
+	@scripts/import_from_linux.sh data/device_records_*.sql data/pipeline_runs_*.sql data/shodan_query_runs_*.sql 2>/dev/null || echo "No data files found in data/ — run 'make export-data' first"
 
 # ─── Python environment ──────────────────────────────────────────────────────
 

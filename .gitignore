@@ -112,3 +112,6 @@ tests/__pycache__/
 *.pyc
 poll_censys_old.py
 poll_censys.py.bak
+# ─── Data exports (keep directory, ignore SQL dumps) ────────────────────────
+data/*.sql
+exports/
