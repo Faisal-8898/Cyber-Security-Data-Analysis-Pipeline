@@ -4,6 +4,19 @@ Everything in the pipeline starts here. Raw logs are generated on the VPS by Cow
 
 ---
 
+## How Incremental Sync Works (You Never Re-Download Old Data)
+
+rsync compares the remote file against your local mirror and transfers **only new bytes**. The three honeypot log files are append-only — rsync detects the remote file is larger and transfers just the tail diff.
+
+**Example:** you pulled on Day 0 (7 days of data). You skip 15 days. On Day 15:
+- rsync sees local `cowrie.json` is at byte offset X; remote is at offset X+N.
+- It transfers only the N new bytes — the 7-day-old data is already in your local mirror.
+- The pipeline bookmark (stored in `PIPELINE_STATE_DIR`) remembers which byte offset was last ingested into the DB, so ingestion also picks up from exactly where it left off.
+
+> **No flag needed.** This is rsync's default behavior. `-a` preserves file modification timestamps, which also keeps the bookmark's inode/mtime detection accurate.
+
+---
+
 ## Architecture
 
 ```
@@ -143,6 +156,109 @@ rsync -az --quiet ${SSH_OPTS} \
 - `-z`: compress in transit — reduces bandwidth on large log files
 - `--quiet`: suppress non-error output — keeps cron/pipeline logs clean
 - `-v` / `--verbose`: use this interactively for debugging
+
+---
+
+## Make Commands — Quick Reference
+
+All commands use the variables at the top of `Makefile` (`VPS`, `KEY`, `LOCAL_DATA`). Override on the command line if needed:
+```bash
+make pull-logs KEY=~/.ssh/other_key
+```
+
+### Check how much new data is waiting on the VPS (no download)
+
+```bash
+make check-new-data
+```
+
+Output shows, per source:
+- Whether the file has changed since your last pull
+- How many bytes would be transferred (= new data size)
+- Current local line count (lines already on disk)
+
+Example output:
+```
+=== Checking new data on VPS (dry-run, no transfer) ===
+
+--- Cowrie SSH/Telnet ---
+cowrie.json
+Number of regular files transferred: 1
+Total transferred file size: 2.34M bytes    ← new bytes to pull
+
+--- Local line counts (already ingested mirror) ---
+  cowrie.json:      48302
+  opencanary.log:   12740
+  glutton.log:       3891
+```
+
+### Pull individual sources
+
+```bash
+make pull-cowrie       # Cowrie SSH/Telnet honeypot only
+make pull-opencanary   # OpenCanary multi-protocol only
+make pull-glutton      # Glutton catch-all TCP only
+```
+
+Each prints the post-sync line count of its local log file.
+
+### Pull all sources in one command
+
+```bash
+make pull-logs
+```
+
+Runs all three pulls sequentially. Sync activity is appended to `~/data/iot-pipeline/logs/sync.log`.
+
+---
+
+## Post-Pull Workflow — Making Honeypot Data Fully Ready
+
+After pulling logs, you need to ingest events into the DB, extract IOCs, and update the daily churn table before the data is usable for analysis.
+
+### One-command full pipeline
+
+```bash
+make ingest-honeypot
+```
+
+This runs all four steps in order:
+
+| Step | What it does |
+|------|-------------|
+| 1 — `pull-logs` | rsync all three sources from VPS |
+| 2 — `ingest` | Parse raw JSONL events → `device_events` table (bookmark-aware, only new bytes) |
+| 3 — `extract` | Extract IP/URL/hash IOCs from new events → `iocs` table |
+| 4 — `aggregate_churn` | Compute daily unique attacker IPs / new vs. returning → `daily_churn` table |
+
+After `make ingest-honeypot` finishes, the DB is fully current and ready for querying / notebook analysis.
+
+### Individual steps (if you need to re-run one)
+
+```bash
+make pull-logs         # sync only — no DB writes
+make run-ingest        # ingest only (uses bookmark — safe to re-run)
+make run-extract       # extract IOCs only
+make aggregate-churn   # churn only (today's date)
+make aggregate-churn-date DAY=2026-04-10   # specific date back-fill
+```
+
+### After ingest — optional enrichment
+
+```bash
+make poll-feeds        # pull ThreatFox + URLhaus feeds, cross-match against IOCs
+make poll              # Shodan + Censys weekly enrichment (consumes API credits)
+make build-graph       # rebuild attack graph + campaign clusters
+```
+
+### Full data-ready sequence (weekly research run)
+
+```bash
+make ingest-honeypot   # honeypot events fully ingested
+make poll-feeds        # threat-feed cross-match updated
+make poll-paper        # Shodan + Censys enrichment (recommended weekly budget)
+make build-graph       # graph + clusters rebuilt
+```
 
 ---
 

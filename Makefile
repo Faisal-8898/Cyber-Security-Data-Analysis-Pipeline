@@ -8,7 +8,106 @@
         check-balance censys-balance censys-test query-summary \
         reclassify \
         aggregate-churn aggregate-churn-date \
-        build-graph build-graph-dry graph-only cluster
+        build-graph build-graph-dry graph-only cluster \
+        check-new-data pull-cowrie pull-opencanary pull-glutton pull-logs ingest-honeypot
+
+# ─── VPS sync configuration ───────────────────────────────────────────────────
+# Override on the command line if your paths differ:
+#   make pull-logs KEY=~/.ssh/other_key LOCAL_DATA=/custom/path
+VPS        := 167.172.187.18
+VPS_PORT   := 8443
+KEY        := $(HOME)/.ssh/research_key
+LOCAL_DATA := $(HOME)/data
+LOG_DIR    := $(HOME)/data/iot-pipeline/logs
+SSH_OPTS   := ssh -p $(VPS_PORT) -i $(KEY)
+
+# ─── Log sync from VPS ───────────────────────────────────────────────────────
+#
+# rsync is already incremental: it transfers ONLY new bytes since your last pull.
+# Running after 15 days picks up exactly the 15 days of new data — nothing older
+# is re-downloaded. The pipeline bookmark then ingests only the new bytes into DB.
+#
+# check-new-data: dry-run to see how much new data exists on the VPS (no transfer)
+# pull-cowrie / pull-opencanary / pull-glutton: sync one source individually
+# pull-logs: sync all three sources in one shot
+# ingest-honeypot: pull-logs → ingest → extract IOCs → churn aggregation (fully ready)
+
+check-new-data:
+	@echo "=== Checking new data on VPS (dry-run, no transfer) ==="
+	@echo ""
+	@echo "--- Cowrie SSH/Telnet ---"
+	@rsync --dry-run -av --stats \
+	    -e "$(SSH_OPTS)" \
+	    cowrie@$(VPS):/home/cowrie/cowrie/var/log/cowrie/ \
+	    $(LOCAL_DATA)/raw-logs/cowrie/ 2>&1 \
+	    | grep -E 'cowrie\.json|bytes|Number of'
+	@echo ""
+	@echo "--- OpenCanary multi-protocol ---"
+	@rsync --dry-run -av --stats \
+	    -e "$(SSH_OPTS)" \
+	    cowrie@$(VPS):/var/tmp/opencanary.log \
+	    $(LOCAL_DATA)/raw-logs/opencanary/ 2>&1 \
+	    | grep -E 'opencanary\.log|bytes|Number of'
+	@echo ""
+	@echo "--- Glutton catch-all TCP ---"
+	@rsync --dry-run -av --stats \
+	    -e "$(SSH_OPTS)" \
+	    cowrie@$(VPS):/var/tmp/glutton.log \
+	    $(LOCAL_DATA)/raw-logs/glutton/ 2>&1 \
+	    | grep -E 'glutton\.log|bytes|Number of'
+	@echo ""
+	@echo "--- Local line counts (already ingested mirror) ---"
+	@printf "  cowrie.json:      "; wc -l < $(LOCAL_DATA)/raw-logs/cowrie/cowrie.json 2>/dev/null || echo "0 (file missing)"
+	@printf "  opencanary.log:   "; wc -l < $(LOCAL_DATA)/raw-logs/opencanary/opencanary.log 2>/dev/null || echo "0 (file missing)"
+	@printf "  glutton.log:      "; wc -l < $(LOCAL_DATA)/raw-logs/glutton/glutton.log 2>/dev/null || echo "0 (file missing)"
+
+pull-cowrie:
+	@echo "Pulling Cowrie logs from VPS..."
+	@mkdir -p $(LOCAL_DATA)/raw-logs/cowrie $(LOG_DIR)
+	@rsync -az --quiet \
+	    -e "$(SSH_OPTS)" \
+	    cowrie@$(VPS):/home/cowrie/cowrie/var/log/cowrie/ \
+	    $(LOCAL_DATA)/raw-logs/cowrie/ >> $(LOG_DIR)/sync.log 2>&1
+	@printf "Done. cowrie.json (live): "; wc -l < $(LOCAL_DATA)/raw-logs/cowrie/cowrie.json 2>/dev/null || echo "0"
+	@printf "Done. ALL rotated files:  "; cat $(LOCAL_DATA)/raw-logs/cowrie/cowrie.json* 2>/dev/null | wc -l || echo "0"
+pull-opencanary:
+	@echo "Pulling OpenCanary logs from VPS..."
+	@mkdir -p $(LOCAL_DATA)/raw-logs/opencanary $(LOG_DIR)
+	@rsync -az --quiet \
+	    -e "$(SSH_OPTS)" \
+	    cowrie@$(VPS):/var/tmp/opencanary.log \
+	    $(LOCAL_DATA)/raw-logs/opencanary/ >> $(LOG_DIR)/sync.log 2>&1
+	@printf "Done. opencanary.log: "; wc -l < $(LOCAL_DATA)/raw-logs/opencanary/opencanary.log 2>/dev/null || echo "0 lines"
+
+pull-glutton:
+	@echo "Pulling Glutton logs from VPS..."
+	@mkdir -p $(LOCAL_DATA)/raw-logs/glutton $(LOG_DIR)
+	@rsync -az --quiet \
+	    -e "$(SSH_OPTS)" \
+	    cowrie@$(VPS):/var/tmp/glutton.log \
+	    $(LOCAL_DATA)/raw-logs/glutton/ >> $(LOG_DIR)/sync.log 2>&1
+	@printf "Done. glutton.log: "; wc -l < $(LOCAL_DATA)/raw-logs/glutton/glutton.log 2>/dev/null || echo "0 lines"
+
+# Pull all three honeypot sources in one command
+pull-logs: pull-cowrie pull-opencanary pull-glutton
+	@echo "All honeypot logs synced."
+
+# Full honeypot data pipeline: sync → ingest → extract IOCs → aggregate churn
+# After this completes, the DB has all new events, IOCs extracted, and daily churn updated.
+ingest-honeypot:
+	@echo "=== Step 1/4: Pulling logs from VPS ==="
+	$(MAKE) pull-logs
+	@echo ""
+	@echo "=== Step 2/4: Ingesting raw events into DB ==="
+	.venv/bin/python3 -m pipeline.run --tasks ingest
+	@echo ""
+	@echo "=== Step 3/4: Extracting IOCs ==="
+	.venv/bin/python3 -m pipeline.run --tasks extract
+	@echo ""
+	@echo "=== Step 4/4: Aggregating daily churn ==="
+	.venv/bin/python3 -m pipeline.run --tasks aggregate_churn
+	@echo ""
+	@echo "Honeypot data fully ready."
 
 # ─── Docker PostgreSQL ────────────────────────────────────────────────────────
 

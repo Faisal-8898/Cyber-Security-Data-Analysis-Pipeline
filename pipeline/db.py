@@ -1,4 +1,5 @@
 """pipeline/db.py — PostgreSQL connection and UPSERT helpers."""
+import logging
 import os
 import uuid
 from typing import Optional
@@ -9,6 +10,8 @@ from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("pipeline")
 
 
 # ---------------------------------------------------------------------------

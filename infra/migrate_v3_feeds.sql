@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_feed_iocs_ioc_value ON feed_iocs (ioc_value);
 CREATE OR REPLACE VIEW v_honeypot_threatfox_matches AS
 SELECT
     ir.ioc_value                      AS honeypot_ip,
-    ir.source_event_id,
+    ir.id                             AS ioc_record_id,
     fi.malware_family,
     fi.confidence,
     fi.tags                           AS feed_tags,
@@ -52,7 +52,7 @@ WHERE ir.ioc_type  = 'ip'
 CREATE OR REPLACE VIEW v_honeypot_urlhaus_matches AS
 SELECT
     ir.ioc_value                      AS honeypot_url,
-    ir.source_event_id,
+    ir.id                             AS ioc_record_id,
     fi.malware_family,
     fi.tags                           AS feed_tags,
     fi.first_seen                     AS urlhaus_first_seen
@@ -66,7 +66,7 @@ WHERE ir.ioc_type  = 'url'
 CREATE OR REPLACE VIEW v_honeypot_malwarebazaar_matches AS
 SELECT
     ir.ioc_value                      AS honeypot_sha256,
-    ir.source_event_id,
+    ir.id                             AS ioc_record_id,
     fi.malware_family,
     fi.confidence,
     fi.tags                           AS feed_tags,
@@ -84,7 +84,7 @@ WHERE ir.ioc_type  = 'sha256'
 CREATE OR REPLACE VIEW v_honeypot_otx_matches AS
 SELECT
     ir.ioc_value                      AS honeypot_ip,
-    ir.source_event_id,
+    ir.id                             AS ioc_record_id,
     fi.malware_family,
     fi.tags                           AS pulse_tags,
     fi.confidence,

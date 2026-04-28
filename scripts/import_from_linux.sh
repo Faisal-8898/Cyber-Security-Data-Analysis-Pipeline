@@ -38,9 +38,21 @@ for file in "$@"; do
   fi
 
   # Import using COPY FROM (reverse of export)
-  psql "$DB_URL" \
-    --command "COPY $TABLE FROM STDIN;" \
-    < "$file"
+  # device_records: Linux server has columns in migration order (snapshot_week/device_type
+  # were added via ALTER TABLE ADD COLUMN, so they appear at position 18/19 not 3/17).
+  # Must specify explicit column list matching Linux physical order.
+  if [[ "$TABLE" == "device_records" ]]; then
+    COLS="(id, source, snapshot_date, ip, port, transport, protocol, product, version, cpe, cve_ids, country_code, asn, org, isp, raw_banner, raw_data, snapshot_week, device_type, hostnames, domains, tags, http_title, http_server, http_headers, ssl_cert, vulns, query_ids, query_category)"
+    psql "$DB_URL" \
+      --command "COPY $TABLE $COLS FROM STDIN;" \
+      < "$file"
+    # Fix sequence after bulk import so new inserts don't collide
+    psql "$DB_URL" -c "SELECT setval('device_records_id_seq', (SELECT MAX(id) FROM device_records));" > /dev/null
+  else
+    psql "$DB_URL" \
+      --command "COPY $TABLE FROM STDIN;" \
+      < "$file"
+  fi
 
   COUNT=$(psql "$DB_URL" -t -c "SELECT COUNT(*) FROM $TABLE;")
   echo "    ✓ $TABLE now has $COUNT total rows"
