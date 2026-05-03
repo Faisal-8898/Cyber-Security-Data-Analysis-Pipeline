@@ -9,7 +9,8 @@
         reclassify \
         aggregate-churn aggregate-churn-date \
         build-graph build-graph-dry graph-only cluster \
-        check-new-data pull-cowrie pull-opencanary pull-glutton pull-logs ingest-honeypot
+        check-new-data pull-cowrie pull-opencanary pull-glutton pull-logs ingest-honeypot \
+        fetch-sonar fetch-sonar-dry fetch-sonar-list
 
 # ─── VPS sync configuration ───────────────────────────────────────────────────
 # Override on the command line if your paths differ:
@@ -87,6 +88,24 @@ pull-glutton:
 	    cowrie@$(VPS):/var/tmp/glutton.log \
 	    $(LOCAL_DATA)/raw-logs/glutton/ >> $(LOG_DIR)/sync.log 2>&1
 	@printf "Done. glutton.log: "; wc -l < $(LOCAL_DATA)/raw-logs/glutton/glutton.log 2>/dev/null || echo "0 lines"
+
+# ─── Rapid7 Project Sonar — IoT scale dataset (free, no API credit limit) ────
+#
+# fetch-sonar:      stream-filter all target IoT ports into ~/data/raw-logs/sonar/
+# fetch-sonar-dry:  show what would be downloaded + sizes (no actual transfer)
+# fetch-sonar-list: list all files currently available in Rapid7 sonar.tcp dataset
+#
+# Requires: RAPID7_API_KEY in .env  (free at https://opendata.rapid7.com/)
+# Output:   ~/data/raw-logs/sonar/sonar_iot_YYYY-MM-DD.jsonl.gz  (≤2 GB compressed)
+# Run:      once per week (Sunday cron alongside poll-paper)
+fetch-sonar-list:
+	.venv/bin/python3 scripts/fetch_sonar.py --list
+
+fetch-sonar-dry:
+	.venv/bin/python3 scripts/fetch_sonar.py --dry-run
+
+fetch-sonar:
+	.venv/bin/python3 scripts/fetch_sonar.py --max-gb 2.0
 
 # Pull all three honeypot sources in one command
 pull-logs: pull-cowrie pull-opencanary pull-glutton
