@@ -59,25 +59,30 @@ def parse_cowrie_line(
     return ev
 
 
-@task("ingest_cowrie")
-def ingest_cowrie(log_path: Path = None, run_id: str = None) -> list[NormalizedEvent]:
-    """Read new Cowrie log lines, parse them, store to DB, return parsed events."""
-    log_path = log_path or _DEFAULT_LOG
-    git_hash = get_pipeline_version()
+def _bookmark_key_for(log_path: Path) -> str:
+    """Return the bookmark key for a given log file path.
 
-    # Import here to allow unit tests to run without DB
-    from . import db as _db
+    The live file uses the stable key "cowrie" so its offset survives renames.
+    Rotated files (cowrie.json.YYYY-MM-DD) get a key derived from their stem
+    so each rotation is tracked independently.
+    """
+    if log_path.name == "cowrie.json":
+        return "cowrie"
+    # e.g. cowrie.json.2026-04-27 → "cowrie_2026-04-27"
+    suffix = log_path.name.replace("cowrie.json.", "")
+    return f"cowrie_{suffix}"
 
-    if run_id is None:
-        run_id = _db.record_run_start(
-            "ingest_cowrie",
-            {"log_path": str(log_path)},
-        )
 
-    lines = read_new_lines(log_path, "cowrie")
+def _ingest_one_file(
+    log_path: Path,
+    run_id: str,
+    git_hash: str,
+    db_module,
+) -> list[NormalizedEvent]:
+    """Ingest a single Cowrie log file, returning parsed events."""
+    bm_key = _bookmark_key_for(log_path)
+    lines = read_new_lines(log_path, bm_key)
     if not lines:
-        logger.info("ingest_cowrie: no new lines")
-        _db.record_run_end(run_id, "success", records_in=0, records_out=0)
         return []
 
     events = []
@@ -86,13 +91,58 @@ def ingest_cowrie(log_path: Path = None, run_id: str = None) -> list[NormalizedE
         if ev:
             events.append(ev)
 
-    stored = _db.store_events(events)
+    stored = db_module.store_events(events)
+    logger.info(
+        f"ingest_cowrie [{log_path.name}]: {len(lines)} lines → "
+        f"{len(events)} parsed → {stored} stored"
+    )
+    return events
+
+
+@task("ingest_cowrie")
+def ingest_cowrie(log_path: Path = None, run_id: str = None) -> list[NormalizedEvent]:
+    """Read new Cowrie log lines from all log files (live + rotated), parse and store.
+
+    Rotated files follow the pattern cowrie.json.YYYY-MM-DD and are processed
+    in chronological order before the live cowrie.json so the DB reflects
+    events in timestamp order.  Each file has its own bookmark so re-runs are
+    idempotent and rotated files are only read once.
+    """
+    log_path = log_path or _DEFAULT_LOG
+    git_hash = get_pipeline_version()
+
+    from . import db as _db
+
+    if run_id is None:
+        run_id = _db.record_run_start("ingest_cowrie", {"log_path": str(log_path)})
+
+    # Build ordered list: rotated files first (chronological), then the live file.
+    log_dir = log_path.parent
+    rotated = sorted(
+        (f for f in log_dir.glob("cowrie.json.*") if not f.name.endswith(".gz")),
+        key=lambda p: p.name,
+    )
+    all_files = rotated + [log_path]
+
+    all_events: list[NormalizedEvent] = []
+    source_files: list[str] = []
+
+    for lp in all_files:
+        if not lp.exists():
+            continue
+        events = _ingest_one_file(lp, run_id, git_hash, _db)
+        all_events.extend(events)
+        if events:
+            source_files.append(str(lp))
+
+    if not all_events:
+        logger.info("ingest_cowrie: no new lines in any file")
+
     _db.record_run_end(
         run_id,
         "success",
-        records_in=len(lines),
-        records_out=stored,
-        source_files=[str(log_path)],
+        records_in=sum(1 for _ in all_events),
+        records_out=len(all_events),
+        source_files=source_files,
     )
-    logger.info(f"ingest_cowrie: {len(lines)} lines → {len(events)} parsed → {stored} stored")
-    return events
+    return all_events

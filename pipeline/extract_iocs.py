@@ -125,16 +125,32 @@ def extract_from_event(ev: NormalizedEvent) -> tuple[list[dict], list[dict]]:
             iocs.append(_ioc("domain", domain.lower(), ev))
 
     # --- File download events — URL + hash --------------------------------
+    # Cowrie session.file_download JSON has no "url" field — only shasum/outfile/destfile.
+    # The hash is stored both in raw_data["shasum"] and in ev["file_hash"] (set by ingest_cowrie).
+    # URLs extracted via wget/curl commands are captured by the command_str block above.
     raw = ev.get("raw_data") or {}
     if ev.get("event_type") == "session.file_download" or "shasum" in raw:
-        url = raw.get("url") or ev.get("url")
-        sha = raw.get("shasum") or raw.get("sha256")
+        url = raw.get("url") or ev.get("download_url")
+        # Prefer raw_data["shasum"] (Cowrie SHA256), fallback to ev["file_hash"] (ingest field)
+        sha = raw.get("shasum") or raw.get("sha256") or ev.get("file_hash")
         if url:
             iocs.append(_ioc("url", url, ev))
         if sha and len(sha) == 64:
             iocs.append(_ioc("sha256", sha.lower(), ev))
         elif sha and len(sha) == 32:
             iocs.append(_ioc("md5", sha.lower(), ev))
+
+    # --- Dionaea download records (attached as raw_data.downloads list) ----
+    for dl in raw.get("downloads", []):
+        dl_url = dl.get("url")
+        dl_md5 = dl.get("md5")
+        dl_sha = dl.get("sha512")
+        if dl_url:
+            iocs.append(_ioc("url", dl_url, ev))
+        if dl_md5 and len(dl_md5) == 32:
+            iocs.append(_ioc("md5", dl_md5.lower(), ev))
+        if dl_sha and len(dl_sha) == 128:
+            iocs.append(_ioc("sha512", dl_sha.lower(), ev))
 
     # --- HTTP path can contain IOCs ----------------------------------------
     http_path = ev.get("http_path") or ""

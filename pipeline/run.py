@@ -39,18 +39,29 @@ def _run_ingest_glutton() -> list:
     return ingest_glutton()
 
 
+def _run_ingest_dionaea() -> list:
+    from .ingest_dionaea import ingest_dionaea
+    return ingest_dionaea()
+
+
 def _run_extract_iocs(events: list) -> tuple[int, int]:
     from .extract_iocs import extract_iocs
     return extract_iocs(events)
 
 
-def _run_poll_shodan() -> int:
+def _run_poll_shodan(week: str | None = None) -> int:
     from .poll_shodan import poll_shodan
+    if week:
+        import os
+        os.environ["SNAPSHOT_WEEK"] = week
     return poll_shodan()
 
 
-def _run_poll_censys() -> int:
+def _run_poll_censys(week: str | None = None) -> int:
     from .poll_censys import poll_censys
+    if week:
+        import os
+        os.environ["SNAPSHOT_WEEK"] = week
     return poll_censys()
 
 
@@ -81,6 +92,7 @@ _INGEST_TASKS = {
     "ingest_cowrie":     _run_ingest_cowrie,
     "ingest_opencanary": _run_ingest_opencanary,
     "ingest_glutton":    _run_ingest_glutton,
+    "ingest_dionaea":    _run_ingest_dionaea,
 }
 
 _POLL_TASKS = {
@@ -102,7 +114,7 @@ _ALL_GRAPH  = list(_GRAPH_TASKS.keys())
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
-def run_pipeline(tasks: list[str]) -> int:
+def run_pipeline(tasks: list[str], week: str | None = None) -> int:
     """
     Execute the requested tasks in dependency order.
 
@@ -163,7 +175,10 @@ def run_pipeline(tasks: list[str]) -> int:
     # --- Poll phase (Shodan / Censys) ----------------------------------------
     for task_name in specific_poll:
         try:
-            stored = _POLL_TASKS[task_name]()
+            if task_name in ("poll_shodan", "poll_censys"):
+                stored = (_run_poll_shodan if task_name == "poll_shodan" else _run_poll_censys)(week)
+            else:
+                stored = _POLL_TASKS[task_name]()
             logger.info(f"Poll complete: {task_name} → {stored} device records stored")
         except Exception as exc:
             logger.error(f"Task {task_name} failed: {exc}")
@@ -221,6 +236,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--week",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Back-fill a missed week: supply any date in the target ISO week "
+            "(e.g. --week 2026-04-26 for the week starting 2026-04-27). "
+            "Normalised to that week's Monday automatically. "
+            "Applies to poll_shodan and poll_censys only."
+        ),
+    )
+    parser.add_argument(
         "--check-db",
         action="store_true",
         help="Only verify DB connectivity and exit.",
@@ -247,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Unknown tasks: {unknown}. Valid: {_VALID_TASKS}", file=sys.stderr)
         return 1
 
-    return run_pipeline(tasks)
+    return run_pipeline(tasks, week=args.week)
 
 
 if __name__ == "__main__":

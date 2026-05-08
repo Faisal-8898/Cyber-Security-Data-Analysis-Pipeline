@@ -124,25 +124,25 @@ def store_events(events: list[dict]) -> int:
             e.get("event_time"),
             e.get("ingested_at"),
             e.get("record_id"),
-            e.get("source_ip"),
+            _sanitize_str(e.get("source_ip")),
             e.get("source_port"),
             e.get("dest_port"),
-            e.get("source"),            # → honeypot column
-            e.get("protocol"),
-            e.get("event_type"),
-            e.get("session_id"),
-            e.get("username"),
-            e.get("password"),
-            e.get("command_str"),
-            e.get("download_url"),
-            e.get("file_hash"),
-            e.get("hassh"),
-            e.get("user_agent"),
-            e.get("http_path"),
+            _sanitize_str(e.get("source")),            # → honeypot column
+            _sanitize_str(e.get("protocol")),
+            _sanitize_str(e.get("event_type")),
+            _sanitize_str(e.get("session_id")),
+            _sanitize_str(e.get("username")),
+            _sanitize_str(e.get("password")),
+            _sanitize_str(e.get("command_str")),
+            _sanitize_str(e.get("download_url")),
+            _sanitize_str(e.get("file_hash")),
+            _sanitize_str(e.get("hassh")),
+            _sanitize_str(e.get("user_agent")),
+            _sanitize_str(e.get("http_path")),
             e.get("pipeline_run_id"),
             e.get("raw_file_path"),
             e.get("raw_line_number"),
-            psycopg2.extras.Json(e.get("raw_data", {})),
+            psycopg2.extras.Json(_sanitize_record(e.get("raw_data", {}))),
         )
         for e in events
     ]
@@ -238,7 +238,7 @@ def upsert_credentials(creds: list[dict]) -> int:
     # Deduplicate within the batch to avoid CardinalityViolation
     merged_creds: dict[tuple, dict] = {}
     for c in creds:
-        key = (c["username"], c["password"])
+        key = (_sanitize_str(c["username"]), _sanitize_str(c["password"]))
         if key in merged_creds:
             existing = merged_creds[key]
             existing["first_seen"] = min(existing["first_seen"], c["first_seen"])
@@ -247,7 +247,7 @@ def upsert_credentials(creds: list[dict]) -> int:
             merged_creds[key] = dict(c)
 
     rows = [
-        (c["username"], c["password"], c["first_seen"], c["last_seen"])
+        (_sanitize_str(c["username"]), _sanitize_str(c["password"]), c["first_seen"], c["last_seen"])
         for c in merged_creds.values()
     ]
     with get_connection() as conn:

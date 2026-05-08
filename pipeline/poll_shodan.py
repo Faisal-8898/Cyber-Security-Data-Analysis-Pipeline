@@ -427,7 +427,29 @@ def poll_shodan(
     sleep_between = float(os.environ.get("SHODAN_SLEEP_BETWEEN_QUERIES", "1.0"))
 
     queries        = queries or SHODAN_QUERIES
-    snapshot_week  = snapshot_week or _monday_of_week()
+
+    # Allow back-filling a missed week: SNAPSHOT_WEEK=YYYY-MM-DD overrides today's Monday.
+    # The value is normalised to the Monday of whatever date is supplied so the
+    # dedup key (source, ip, port, snapshot_week) always aligns to a week boundary.
+    _week_override = os.environ.get("SNAPSHOT_WEEK", "").strip()
+    if snapshot_week is None:
+        if _week_override:
+            try:
+                _override_date = date.fromisoformat(_week_override)
+                snapshot_week  = _monday_of_week(_override_date)
+                logger.info(
+                    f"poll_shodan: SNAPSHOT_WEEK override → {snapshot_week}"
+                    f" (supplied: {_week_override})"
+                )
+            except ValueError:
+                logger.warning(
+                    f"poll_shodan: SNAPSHOT_WEEK={_week_override!r} is not a valid"
+                    f" YYYY-MM-DD date — using current week"
+                )
+                snapshot_week = _monday_of_week()
+        else:
+            snapshot_week = _monday_of_week()
+
     snapshot_date  = date.today()
     git_hash       = get_pipeline_version()
 

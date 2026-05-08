@@ -52,6 +52,10 @@ for file in "$@"; do
     psql "$DB_URL" \
       --command "COPY $TABLE FROM STDIN;" \
       < "$file"
+    # Fix sequence after bulk import so new inserts don't collide with imported ids
+    if [[ "$TABLE" == "shodan_query_runs" ]]; then
+      psql "$DB_URL" -c "SELECT setval('shodan_query_runs_id_seq', (SELECT MAX(id) FROM shodan_query_runs));" > /dev/null
+    fi
   fi
 
   COUNT=$(psql "$DB_URL" -t -c "SELECT COUNT(*) FROM $TABLE;")

@@ -5,11 +5,12 @@
         poll-shodan-max poll-censys-max poll-max \
         poll-censys-paper poll-paper \
         poll-feeds \
+        poll-shodan-week poll-censys-week poll-week \
         check-balance censys-balance censys-test query-summary \
         reclassify \
         aggregate-churn aggregate-churn-date \
         build-graph build-graph-dry graph-only cluster \
-        check-new-data pull-cowrie pull-opencanary pull-glutton pull-logs ingest-honeypot \
+        check-new-data pull-cowrie pull-opencanary pull-glutton pull-dionaea pull-logs ingest-honeypot \
         fetch-sonar fetch-sonar-dry fetch-sonar-list
 
 # ─── VPS sync configuration ───────────────────────────────────────────────────
@@ -18,9 +19,11 @@
 VPS        := 167.172.187.18
 VPS_PORT   := 8443
 KEY        := $(HOME)/.ssh/research_key
+KEY_ROOT   := $(HOME)/.ssh/cs-datapipe
 LOCAL_DATA := $(HOME)/data
 LOG_DIR    := $(HOME)/data/iot-pipeline/logs
 SSH_OPTS   := ssh -p $(VPS_PORT) -i $(KEY)
+SSH_ROOT   := ssh -p $(VPS_PORT) -i $(KEY_ROOT)
 
 # ─── Log sync from VPS ───────────────────────────────────────────────────────
 #
@@ -89,6 +92,16 @@ pull-glutton:
 	    $(LOCAL_DATA)/raw-logs/glutton/ >> $(LOG_DIR)/sync.log 2>&1
 	@printf "Done. glutton.log: "; wc -l < $(LOCAL_DATA)/raw-logs/glutton/glutton.log 2>/dev/null || echo "0 lines"
 
+pull-dionaea:
+	@echo "Pulling Dionaea captures from VPS..."
+	@mkdir -p $(LOCAL_DATA)/raw-logs/dionaea $(LOG_DIR)
+	@rsync -az --quiet \
+	    -e "$(SSH_ROOT)" \
+	    root@$(VPS):/var/lib/dionaea/ \
+	    $(LOCAL_DATA)/raw-logs/dionaea/ >> $(LOG_DIR)/sync.log 2>&1
+	@printf "Dionaea SQLite DBs pulled: "; find $(LOCAL_DATA)/raw-logs/dionaea -name "*.sqlite" 2>/dev/null | wc -l
+	@printf "Dionaea binaries pulled:   "; ls $(LOCAL_DATA)/raw-logs/dionaea/binaries/ 2>/dev/null | wc -l || echo "0"
+
 # ─── Rapid7 Project Sonar — IoT scale dataset (free, no API credit limit) ────
 #
 # fetch-sonar:      stream-filter all target IoT ports into ~/data/raw-logs/sonar/
@@ -108,20 +121,19 @@ fetch-sonar:
 	.venv/bin/python3 scripts/fetch_sonar.py --max-gb 2.0
 
 # Pull all three honeypot sources in one command
-pull-logs: pull-cowrie pull-opencanary pull-glutton
+pull-logs: pull-cowrie pull-opencanary pull-glutton pull-dionaea
 	@echo "All honeypot logs synced."
 
 # Full honeypot data pipeline: sync → ingest → extract IOCs → aggregate churn
 # After this completes, the DB has all new events, IOCs extracted, and daily churn updated.
+# NOTE: ingest and extract run in ONE process invocation so in-memory events are
+#       handed directly to extract_iocs without a DB round-trip.
 ingest-honeypot:
-	@echo "=== Step 1/4: Pulling logs from VPS ==="
+	@echo "=== Step 1/4: Pulling logs from VPS (Cowrie + OpenCanary + Glutton + Dionaea) ==="
 	$(MAKE) pull-logs
 	@echo ""
-	@echo "=== Step 2/4: Ingesting raw events into DB ==="
-	.venv/bin/python3 -m pipeline.run --tasks ingest
-	@echo ""
-	@echo "=== Step 3/4: Extracting IOCs ==="
-	.venv/bin/python3 -m pipeline.run --tasks extract
+	@echo "=== Step 2-3/4: Ingesting raw events + Extracting IOCs (single process) ==="
+	.venv/bin/python3 -m pipeline.run --tasks ingest,extract
 	@echo ""
 	@echo "=== Step 4/4: Aggregating daily churn ==="
 	.venv/bin/python3 -m pipeline.run --tasks aggregate_churn
@@ -294,6 +306,64 @@ poll-paper:
 	$(MAKE) poll-censys-paper
 	@echo "  ✅ Censys enrichment complete"
 	@echo "───────────────────────────────────────────────────────────────────"
+
+# ─── Back-fill a missed Saturday — MAX DATA ──────────────────────────────────
+#
+# Use when you missed your scheduled Saturday poll.
+# Stores data under the CORRECT snapshot_week (not the current week) so the
+# longitudinal time-series stays intact.
+#
+# Uses MAXIMUM settings: 200 results/Shodan query + all 100 Censys credits
+# with priority on high-value categories (E=proxy, L=combos, F=botnet, H=spam).
+#
+# ── LAST SATURDAY (May 2, 2026) → Monday 2026-04-27 ─────────────────────────
+#   make poll-week WEEK=2026-05-02        ← back-fill last Sat (today: May 5)
+#
+# ── GENERAL USAGE ────────────────────────────────────────────────────────────
+#   make poll-week        WEEK=YYYY-MM-DD  ← any date in the missed week
+#   make poll-shodan-week WEEK=YYYY-MM-DD  ← Shodan only
+#   make poll-censys-week WEEK=YYYY-MM-DD  ← Censys only (after Shodan)
+#
+# WEEK is auto-normalised to that week's Monday. Safe to re-run (UPSERT).
+# Credits: 80 Shodan (40q × 2cr) + 100 Censys = 180 total for the back-fill.
+# ─────────────────────────────────────────────────────────────────────────────
+
+poll-shodan-week:
+	@test -n "$(WEEK)" || (echo "Usage: make poll-shodan-week WEEK=YYYY-MM-DD  (e.g. WEEK=2026-05-02 for last Saturday)"; exit 1)
+	SNAPSHOT_WEEK=$(WEEK) SHODAN_MAX_PER_QUERY=200 \
+	SHODAN_RESUME=1 \
+	.venv/bin/python3 -m pipeline.run --tasks poll_shodan --week $(WEEK)
+
+poll-censys-week:
+	@test -n "$(WEEK)" || (echo "Usage: make poll-censys-week WEEK=YYYY-MM-DD  (e.g. WEEK=2026-05-02 for last Saturday)"; exit 1)
+	SNAPSHOT_WEEK=$(WEEK) \
+	CENSYS_MAX_ENRICH=100 \
+	CENSYS_PRIORITY_CATEGORIES=E,L,F,H \
+	CENSYS_PRIORITY_PORTS=1080,3128,8080,25,7547,23,2323,554 \
+	CENSYS_PRIORITY_DEVICE_TYPES=router,camera,iot \
+	.venv/bin/python3 -m pipeline.run --tasks poll_censys --week $(WEEK)
+
+poll-week:
+	@test -n "$(WEEK)" || (echo "Usage: make poll-week WEEK=YYYY-MM-DD  (e.g. WEEK=2026-05-02 for last Saturday)"; exit 1)
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "  Back-fill: week containing $(WEEK) → snapshot_week auto-set to its Monday"
+	@echo "  Shodan:  200 results/query × 40 queries = 80 credits"
+	@echo "  Censys:  100 enrichments, priority: E,L,F,H categories"
+	@echo "  Total credits: 180"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "  [1/2] Shodan snapshot..."
+	SNAPSHOT_WEEK=$(WEEK) SHODAN_MAX_PER_QUERY=200 \
+	.venv/bin/python3 -m pipeline.run --tasks poll_shodan --week $(WEEK)
+	@echo "  [2/2] Censys enrichment (reads Shodan IPs stored for that week)..."
+	SNAPSHOT_WEEK=$(WEEK) \
+	CENSYS_MAX_ENRICH=100 \
+	CENSYS_PRIORITY_CATEGORIES=E,L,F,H \
+	CENSYS_PRIORITY_PORTS=1080,3128,8080,25,7547,23,2323,554 \
+	CENSYS_PRIORITY_DEVICE_TYPES=router,camera,iot \
+	.venv/bin/python3 -m pipeline.run --tasks poll_censys --week $(WEEK)
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "  Back-fill complete for week containing $(WEEK)."
+	@echo "═══════════════════════════════════════════════════════════════════"
 
 # Both max-credit runs back-to-back (extreme: use all budget in one week)
 poll-max:
