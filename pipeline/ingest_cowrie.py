@@ -1,4 +1,6 @@
 """pipeline/ingest_cowrie.py — Parse Cowrie JSON log lines into NormalizedEvents."""
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path

@@ -140,11 +140,13 @@ docker run -d \
   -p 445:445 \
   -p 1433:1433 \
   -p 3306:3306 \
-  -v /var/lib/dionaea:/opt/dionaea/var/dionaea \
+  -v /var/lib/dionaea:/opt/dionaea/var/lib/dionaea \
   -v /var/log/dionaea:/opt/dionaea/var/log/dionaea \
   dinotools/dionaea
 
 # NOTE: Port 21 intentionally omitted — OpenCanary already owns it
+# CRITICAL: Both -v mounts are required. Without the log mount, dionaea.log
+# accumulates inside the containerd overlay layer and will fill the disk.
 ```
 
 ### Step 4 — Verify it started

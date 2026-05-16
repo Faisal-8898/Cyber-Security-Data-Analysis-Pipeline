@@ -68,7 +68,7 @@ check-new-data:
 pull-cowrie:
 	@echo "Pulling Cowrie logs from VPS..."
 	@mkdir -p $(LOCAL_DATA)/raw-logs/cowrie $(LOG_DIR)
-	@rsync -az --quiet \
+	@rsync -az --inplace --quiet \
 	    -e "$(SSH_OPTS)" \
 	    cowrie@$(VPS):/home/cowrie/cowrie/var/log/cowrie/ \
 	    $(LOCAL_DATA)/raw-logs/cowrie/ >> $(LOG_DIR)/sync.log 2>&1
@@ -77,7 +77,7 @@ pull-cowrie:
 pull-opencanary:
 	@echo "Pulling OpenCanary logs from VPS..."
 	@mkdir -p $(LOCAL_DATA)/raw-logs/opencanary $(LOG_DIR)
-	@rsync -az --quiet \
+	@rsync -az --inplace --quiet \
 	    -e "$(SSH_OPTS)" \
 	    cowrie@$(VPS):/var/tmp/opencanary.log \
 	    $(LOCAL_DATA)/raw-logs/opencanary/ >> $(LOG_DIR)/sync.log 2>&1
@@ -86,7 +86,7 @@ pull-opencanary:
 pull-glutton:
 	@echo "Pulling Glutton logs from VPS..."
 	@mkdir -p $(LOCAL_DATA)/raw-logs/glutton $(LOG_DIR)
-	@rsync -az --quiet \
+	@rsync -az --inplace --quiet \
 	    -e "$(SSH_OPTS)" \
 	    cowrie@$(VPS):/var/tmp/glutton.log \
 	    $(LOCAL_DATA)/raw-logs/glutton/ >> $(LOG_DIR)/sync.log 2>&1
@@ -95,10 +95,10 @@ pull-glutton:
 pull-dionaea:
 	@echo "Pulling Dionaea captures from VPS..."
 	@mkdir -p $(LOCAL_DATA)/raw-logs/dionaea $(LOG_DIR)
-	@rsync -az --quiet \
+	@rsync -az --quiet --ignore-errors \
 	    -e "$(SSH_ROOT)" \
 	    root@$(VPS):/var/lib/dionaea/ \
-	    $(LOCAL_DATA)/raw-logs/dionaea/ >> $(LOG_DIR)/sync.log 2>&1
+	    $(LOCAL_DATA)/raw-logs/dionaea/ >> $(LOG_DIR)/sync.log 2>&1 || true
 	@printf "Dionaea SQLite DBs pulled: "; find $(LOCAL_DATA)/raw-logs/dionaea -name "*.sqlite" 2>/dev/null | wc -l
 	@printf "Dionaea binaries pulled:   "; ls $(LOCAL_DATA)/raw-logs/dionaea/binaries/ 2>/dev/null | wc -l || echo "0"
 

@@ -147,10 +147,12 @@ def ingest_dionaea(
         con = sqlite3.connect(str(db_path))
         con.row_factory = sqlite3.Row
 
-        # Fetch all downloads keyed by connection id
+        # Fetch downloads for new connections only (connection id > bookmark)
         downloads_by_conn: dict[int, list[dict]] = {}
         for dl_row in con.execute(
             "SELECT connection, download_url, download_md5_hash FROM downloads"
+            " WHERE connection > ?",
+            (last_id,),
         ):
             cid = dl_row["connection"]
             downloads_by_conn.setdefault(cid, []).append(

@@ -1,4 +1,6 @@
 """pipeline/ingest_opencanary.py — Parse OpenCanary JSON log lines into NormalizedEvents."""
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime, timezone

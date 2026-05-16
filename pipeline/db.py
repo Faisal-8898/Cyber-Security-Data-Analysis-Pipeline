@@ -553,7 +553,7 @@ def upsert_graph_nodes(nodes: list[dict]) -> dict[str, int]:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            execute_values(
+            returned = execute_values(
                 cur,
                 """
                 INSERT INTO graph_nodes
@@ -568,7 +568,9 @@ def upsert_graph_nodes(nodes: list[dict]) -> dict[str, int]:
                 rows,
                 fetch=True,
             )
-            return {row[1]: row[0] for row in cur.fetchall()}
+            # execute_values(fetch=True) returns rows directly; do NOT call
+            # cur.fetchall() again — the cursor is already exhausted.
+            return {row[1]: row[0] for row in (returned or [])}
 
 
 def upsert_graph_edges(edges: list[dict]) -> int:
@@ -655,5 +657,6 @@ def upsert_campaign_clusters(clusters: list[dict]) -> int:
                     metadata        = EXCLUDED.metadata
                 """,
                 rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::inet[],%s,%s,%s)",
             )
             return cur.rowcount

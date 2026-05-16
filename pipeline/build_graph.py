@@ -52,7 +52,7 @@ except ImportError:
 
 from .core import get_pipeline_version, logger, task
 
-_GRAPH_DIR = Path(os.getenv("GRAPH_OUTPUT_DIR", "/var/lib/iot-pipeline"))
+_GRAPH_DIR = Path(os.getenv("GRAPH_OUTPUT_DIR", str(Path.home() / "data" / "iot-pipeline" / "graphs")))
 _DRY_RUN   = os.getenv("GRAPH_DRY_RUN", "0") == "1"
 
 
@@ -83,7 +83,7 @@ def _load_event_signals() -> list[dict[str, Any]]:
             cur.execute(
                 """
                 SELECT DISTINCT
-                    source_ip::TEXT,
+                    host(source_ip)  AS source_ip,
                     download_url,
                     file_hash,
                     hassh
@@ -111,8 +111,8 @@ def _load_credential_cooccurrence() -> list[tuple[str, str]]:
             cur.execute(
                 """
                 SELECT DISTINCT
-                    a.source_ip::TEXT AS ip_a,
-                    b.source_ip::TEXT AS ip_b
+                    host(a.source_ip) AS ip_a,
+                    host(b.source_ip) AS ip_b
                 FROM honeypot_events a
                 JOIN honeypot_events b
                     ON a.username = b.username
@@ -388,13 +388,15 @@ def build_networkx_graph(snapshot_week: date | None = None) -> nx.DiGraph | None
 
     if not _DRY_RUN:
         node_id_map = _db.upsert_graph_nodes(nodes_to_write)
+        logger.info(f"build_networkx_graph: node_id_map has {len(node_id_map)} entries")
 
         # --- Persist edges -------------------------------------------------------
         edges_to_write = []
+        missing_nodes = set()
         for src, tgt, edata in G.edges(data=True):
             src_id = node_id_map.get(src)
             tgt_id = node_id_map.get(tgt)
-            if src_id and tgt_id:
+            if src_id is not None and tgt_id is not None:
                 edges_to_write.append({
                     "source_node_id": src_id,
                     "target_node_id": tgt_id,
@@ -404,6 +406,13 @@ def build_networkx_graph(snapshot_week: date | None = None) -> nx.DiGraph | None
                     "last_seen":      edata.get("last_seen"),
                     "evidence":       {},
                 })
+            else:
+                if src_id is None:
+                    missing_nodes.add(src)
+                if tgt_id is None:
+                    missing_nodes.add(tgt)
+        
+        logger.info(f"build_networkx_graph: {len(edges_to_write)} edges written (graph has {G.number_of_edges()} edges, {len(missing_nodes)} nodes missing from map)")
         _db.upsert_graph_edges(edges_to_write)
 
         # --- Serialize GraphML for reproducibility ---------------------------
@@ -467,36 +476,43 @@ def cluster_campaigns(G: nx.DiGraph | None = None) -> int:
         _db.record_run_end(run_id, "success", records_out=0)
         return 0
 
-    # --- Build cluster records from honeypot_events stats --------------------
+    # --- Bulk-fetch all stats in 3 queries (replaces N×3 per-cluster queries) -
+    # Build an ip → cluster_id reverse map for joining results back
+    ip_to_cid: dict[str, str] = {}
+    for cid, ip_list in cluster_map.items():
+        for ip in ip_list:
+            ip_to_cid[ip] = cid
+
+    all_ips = list(ip_to_cid.keys())
+    bulk_stats = _bulk_cluster_stats(all_ips, ip_to_cid)
+
+    # --- Build cluster records -----------------------------------------------
     clusters: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc).isoformat()
 
     for cid, ip_list in cluster_map.items():
         if not ip_list:
             continue
 
-        # Use the stable hash-based ID as cluster_id for reproducibility
         stable_id = _stable_cluster_id(ip_list)
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Fetch per-cluster aggregated stats from DB
-        stats = _cluster_stats(ip_list)
+        stats = bulk_stats.get(cid, {})
 
         clusters.append({
-            "cluster_id":      stable_id,
-            "name":            f"cluster_{cid}_{date.today().isoformat()}",
-            "first_seen":      stats.get("first_seen") or now,
-            "last_seen":       stats.get("last_seen") or now,
-            "active":          True,
-            "event_count":     stats.get("event_count", 0),
-            "source_ip_count": len(ip_list),
+            "cluster_id":       stable_id,
+            "name":             f"cluster_{cid}_{date.today().isoformat()}",
+            "first_seen":       stats.get("first_seen") or now,
+            "last_seen":        stats.get("last_seen") or now,
+            "active":           True,
+            "event_count":      stats.get("event_count", 0),
+            "source_ip_count":  len(ip_list),
             "primary_protocol": stats.get("primary_protocol"),
-            "primary_creds":   stats.get("primary_creds", []),
-            "c2_ips":          stats.get("c2_ips", []),
-            "c2_domains":      stats.get("c2_domains", []),
-            "malware_hashes":  stats.get("malware_hashes", []),
+            "primary_creds":    stats.get("primary_creds", []),
+            "c2_ips":           stats.get("c2_ips", []),
+            "c2_domains":       stats.get("c2_domains", []),
+            "malware_hashes":   stats.get("malware_hashes", []),
             "metadata": {
                 "louvain_id": cid,
-                "member_ips": ip_list[:20],   # store first 20 for reference
+                "member_ips": ip_list[:20],
             },
         })
 
@@ -511,26 +527,33 @@ def cluster_campaigns(G: nx.DiGraph | None = None) -> int:
     return written
 
 
-def _cluster_stats(ip_list: list[str]) -> dict[str, Any]:
+def _bulk_cluster_stats(
+    all_ips: list[str],
+    ip_to_cid: dict[str, str],
+) -> dict[str, dict[str, Any]]:
     """
-    Query honeypot_events for aggregate stats over the given IP list.
-    Returns a dict with event_count, first_seen, last_seen, primary_protocol,
-    primary_creds, c2_ips, c2_domains, malware_hashes.
+    Fetch honeypot_events aggregate stats for ALL clusters in 3 bulk queries.
+    Returns a dict keyed by cluster_id (str).
+    Replaces the old per-cluster _cluster_stats() that caused N×3 round-trips.
     """
     from . import db as _db
 
-    if not ip_list:
+    if not all_ips:
         return {}
 
-    # psycopg2 / PostgreSQL — pass list as INET[]
-    placeholders = ",".join(["%s"] * len(ip_list))
+    result: dict[str, dict[str, Any]] = defaultdict(lambda: {
+        "event_count": 0, "first_seen": None, "last_seen": None,
+        "primary_protocol": None, "primary_creds": [], "c2_ips": [],
+        "c2_domains": [], "malware_hashes": [],
+    })
 
     with _db.get_connection() as conn:
         with conn.cursor() as cur:
-            # Aggregate stats
+            # ── Query 1: per-IP aggregate stats ────────────────────────────
             cur.execute(
-                f"""
+                """
                 SELECT
+                    host(source_ip)                         AS ip,
                     COUNT(*)                                AS event_count,
                     MIN(event_time)                         AS first_seen,
                     MAX(event_time)                         AS last_seen,
@@ -538,32 +561,51 @@ def _cluster_stats(ip_list: list[str]) -> dict[str, Any]:
                     array_agg(DISTINCT file_hash)
                         FILTER (WHERE file_hash IS NOT NULL) AS malware_hashes
                 FROM honeypot_events
-                WHERE source_ip::TEXT IN ({placeholders})
+                WHERE host(source_ip) = ANY(%s)
+                GROUP BY host(source_ip)
                 """,
-                ip_list,
+                (all_ips,),
             )
-            row = cur.fetchone()
-            if not row:
-                return {}
+            for ip, cnt, fs, ls, proto, hashes in cur.fetchall():
+                cid = ip_to_cid.get(ip)
+                if cid is None:
+                    continue
+                r = result[cid]
+                r["event_count"] += cnt or 0
+                if fs and (r["first_seen"] is None or fs < r["first_seen"]):
+                    r["first_seen"] = fs
+                if ls and (r["last_seen"] is None or ls > r["last_seen"]):
+                    r["last_seen"] = ls
+                if proto and r["primary_protocol"] is None:
+                    r["primary_protocol"] = proto
+                if hashes:
+                    r["malware_hashes"] = list({*r["malware_hashes"], *[h for h in hashes if h]})[:10]
 
-            event_count, first_seen, last_seen, primary_protocol, malware_hashes = row
-
-            # Top-3 credential pairs
+            # ── Query 2: top-3 credential pairs per cluster ─────────────────
             cur.execute(
-                f"""
-                SELECT username || ':' || password AS cred
+                """
+                SELECT
+                    host(source_ip)                         AS ip,
+                    username || ':' || password             AS cred,
+                    COUNT(*)                                AS cnt
                 FROM honeypot_events
-                WHERE source_ip::TEXT IN ({placeholders})
+                WHERE host(source_ip) = ANY(%s)
                   AND username IS NOT NULL AND password IS NOT NULL
-                GROUP BY username, password
-                ORDER BY COUNT(*) DESC
-                LIMIT 3
+                GROUP BY host(source_ip), username, password
+                ORDER BY cnt DESC
                 """,
-                ip_list,
+                (all_ips,),
             )
-            primary_creds = [r[0] for r in cur.fetchall()]
+            cred_buf: dict[str, list[tuple[int, str]]] = defaultdict(list)
+            for ip, cred, cnt in cur.fetchall():
+                cid = ip_to_cid.get(ip)
+                if cid:
+                    cred_buf[cid].append((cnt, cred))
+            for cid, pairs in cred_buf.items():
+                pairs.sort(reverse=True)
+                result[cid]["primary_creds"] = [c for _, c in pairs[:3]]
 
-            # C2 IPs/domains from ioc_records whose source_honeypots overlap
+            # ── Query 3: global C2 IOCs (same for all clusters) ─────────────
             cur.execute(
                 """
                 SELECT ioc_type, ioc_value
@@ -573,23 +615,23 @@ def _cluster_stats(ip_list: list[str]) -> dict[str, Any]:
                 ORDER BY occurrence_count DESC
                 LIMIT 20
                 """,
-                (["cowrie", "opencanary"],),   # broad filter; refine if needed
+                (["cowrie", "opencanary"],),
             )
-            c2_ips:     list[str] = []
-            c2_domains: list[str] = []
+            global_c2_ips: list[str] = []
+            global_c2_domains: list[str] = []
             for ioc_type, ioc_val in cur.fetchall():
                 if ioc_type == "ip":
-                    c2_ips.append(ioc_val)
+                    global_c2_ips.append(ioc_val)
                 else:
-                    c2_domains.append(ioc_val)
+                    global_c2_domains.append(ioc_val)
 
-    return {
-        "event_count":      event_count or 0,
-        "first_seen":       first_seen.isoformat() if first_seen else None,
-        "last_seen":        last_seen.isoformat()  if last_seen  else None,
-        "primary_protocol": primary_protocol,
-        "primary_creds":    primary_creds,
-        "c2_ips":           c2_ips[:10],
-        "c2_domains":       c2_domains[:10],
-        "malware_hashes":   [h for h in (malware_hashes or []) if h][:10],
-    }
+    # Attach global C2 lists to every cluster and serialise timestamps
+    for cid, r in result.items():
+        r["c2_ips"]     = global_c2_ips[:10]
+        r["c2_domains"] = global_c2_domains[:10]
+        if r["first_seen"] and hasattr(r["first_seen"], "isoformat"):
+            r["first_seen"] = r["first_seen"].isoformat()
+        if r["last_seen"] and hasattr(r["last_seen"], "isoformat"):
+            r["last_seen"] = r["last_seen"].isoformat()
+
+    return dict(result)

@@ -88,8 +88,8 @@ def parse_glutton_line(
 
     msg = e.get("msg", "")
 
-    # Only store connection events
-    if "Packet got handled" not in msg:
+    # Only store connection events (case-insensitive: Glutton version differences)
+    if "packet got handled" not in msg.lower():
         return None
 
     # Synthesize timestamp field for make_event

@@ -488,9 +488,11 @@ iptables -A OUTPUT -m owner --uid-owner cowrie -p udp --dport 53 -j ACCEPT
 # Allow Cowrie to download malware samples
 iptables -A OUTPUT -m owner --uid-owner cowrie -p tcp --dport 80  -j ACCEPT
 iptables -A OUTPUT -m owner --uid-owner cowrie -p tcp --dport 443 -j ACCEPT
-# Block all other outbound from Cowrie (prevent propagation)
-iptables -A OUTPUT -m owner --uid-owner cowrie -p tcp             -j DROP
-iptables -A OUTPUT -m owner --uid-owner cowrie -p udp             -j DROP
+# Block NEW outbound connections from Cowrie (prevent propagation)
+# CRITICAL: use --ctstate NEW — bare DROP would also kill Cowrie's SYN-ACK replies
+# to incoming attackers, breaking all incoming connections and producing no logs.
+iptables -A OUTPUT -m owner --uid-owner cowrie -p tcp -m conntrack --ctstate NEW -j DROP
+iptables -A OUTPUT -m owner --uid-owner cowrie -p udp -m conntrack --ctstate NEW -j DROP
 
 netfilter-persistent save
 ```
